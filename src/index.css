@@ -1,1 +1,15 @@
 @import "tailwindcss";
+
+/* Tells Tailwind v4 to enable dark: classes when the .dark class is on <html> */
+@custom-variant dark (&:where(.dark, .dark *));
+
+body {
+  background-color: #f8fafc;
+  color: #0f172a;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+:root.dark body {
+  background-color: #090d16;
+  color: #ffffff;
+}
