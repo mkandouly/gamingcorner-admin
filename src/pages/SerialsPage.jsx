@@ -6,6 +6,7 @@ import {
   Loader2,
   ArrowDownToLine,
   ArrowUpFromLine,
+  Truck,
   ShieldCheck,
   ShieldAlert,
   Trash2,
@@ -23,7 +24,8 @@ import ConfirmDialog from '../components/ConfirmDialog';
 
 const TABS = [
   { key: 'in', label: 'Stock In', icon: ArrowDownToLine },
-  { key: 'out', label: 'Sales & Warranty', icon: ArrowUpFromLine },
+  { key: 'out-client', label: 'Client Sales', icon: ArrowUpFromLine },
+  { key: 'out-distributor', label: 'Distributor Sales', icon: Truck },
   { key: 'offers', label: 'PC Offers', icon: Package },
 ];
 
@@ -96,7 +98,7 @@ function ProductOrSkuPicker({ products, productId, sku, onProductChange, onSkuCh
 }
 
 const EMPTY_IN = { product_id: null, sku: '', quantity: '', cost_price: '', source: '', notes: '' };
-const EMPTY_OUT = { product_id: null, sku: '', serial_number: '', warranty_months: '', sale_price: '', order_id: '', notes: '' };
+const EMPTY_OUT = { product_id: null, sku: '', serial_number: '', warranty_months: '', sale_price: '', order_id: '', distributor_id: '', notes: '' };
 const EMPTY_OFFER_ITEM = { product_id: null, sku: '', serial_number: '' };
 const EMPTY_OFFER = { items: [{ ...EMPTY_OFFER_ITEM }], sale_price: '', warranty_months: '', order_id: '', notes: '' };
 
@@ -107,6 +109,7 @@ export default function SerialsPage() {
 
   const [tab, setTab] = useState('in');
   const [products, setProducts] = useState([]);
+  const [distributors, setDistributors] = useState([]);
 
   const [receipts, setReceipts] = useState([]);
   const [inventorySummary, setInventorySummary] = useState([]);
@@ -163,6 +166,16 @@ export default function SerialsPage() {
     }
   }, [products.length]);
 
+  const loadDistributors = useCallback(async () => {
+    if (distributors.length > 0) return;
+    try {
+      const res = await client.get('/api/admin/distributors', { params: { limit: 200 } });
+      setDistributors(res.data?.data || []);
+    } catch (err) {
+      console.error('Failed to load distributors:', err);
+    }
+  }, [distributors.length]);
+
   const fetchInventorySummary = useCallback(async () => {
     setInventorySummaryLoading(true);
     try {
@@ -200,7 +213,7 @@ export default function SerialsPage() {
     setSalesLoading(true);
     setSalesError(null);
     try {
-      const params = { page: salesPage, limit: 20 };
+      const params = { page: salesPage, limit: 20, type: tab === 'out-distributor' ? 'distributor' : 'client' };
       if (search) params.search = search;
       const res = await client.get('/api/admin/serials', { params });
       setSales(res.data?.data || []);
@@ -211,15 +224,19 @@ export default function SerialsPage() {
     } finally {
       setSalesLoading(false);
     }
-  }, [salesPage, search]);
+  }, [salesPage, search, tab]);
 
   useEffect(() => {
     if (canView && tab === 'in') fetchReceipts();
   }, [canView, tab, fetchReceipts]);
 
   useEffect(() => {
-    if (canView && tab === 'out') fetchSales();
+    if (canView && (tab === 'out-client' || tab === 'out-distributor')) fetchSales();
   }, [canView, tab, fetchSales]);
+
+  useEffect(() => {
+    setSalesPage(1);
+  }, [tab]);
 
   useEffect(() => {
     setSalesPage(1);
@@ -407,11 +424,14 @@ export default function SerialsPage() {
     setOutError(null);
     setOutFormOpen(true);
     loadProducts();
+    if (tab === 'out-distributor') loadDistributors();
   };
 
   const submitOut = async (e) => {
     e.preventDefault();
     setOutError(null);
+
+    const isDistributorSale = tab === 'out-distributor';
 
     if (!outForm.sku.trim()) {
       setOutError('Pick a product or type a SKU.');
@@ -425,6 +445,10 @@ export default function SerialsPage() {
       setOutError('Sale price is required.');
       return;
     }
+    if (isDistributorSale && !outForm.distributor_id) {
+      setOutError('Pick which distributor this sale is to.');
+      return;
+    }
 
     setOutSaving(true);
     try {
@@ -434,6 +458,7 @@ export default function SerialsPage() {
         warranty_months: outForm.warranty_months ? Number(outForm.warranty_months) : null,
         sale_price: Number(outForm.sale_price),
         order_id: outForm.order_id ? Number(outForm.order_id) : null,
+        distributor_id: isDistributorSale && outForm.distributor_id ? Number(outForm.distributor_id) : null,
       });
       setOutFormOpen(false);
       setSalesPage(1);
@@ -681,7 +706,7 @@ export default function SerialsPage() {
         </div>
       )}
 
-      {tab === 'out' && (
+      {(tab === 'out-client' || tab === 'out-distributor') && (
         <div>
           <div className="flex justify-between items-center gap-2 mb-4">
             <form onSubmit={handleSearchSubmit} className="flex gap-2 flex-1 max-w-md">
@@ -709,14 +734,16 @@ export default function SerialsPage() {
                   onClick={openOutForm}
                   className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
                 >
-                  <Plus className="w-4 h-4" /> Record Sale
+                  <Plus className="w-4 h-4" /> {tab === 'out-distributor' ? 'Record Distributor Sale' : 'Record Sale'}
                 </button>
-                <button
-                  onClick={openOfferForm}
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white transition-colors"
-                >
-                  <Package className="w-4 h-4" /> Record PC Offer
-                </button>
+                {tab === 'out-client' && (
+                  <button
+                    onClick={openOfferForm}
+                    className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white transition-colors"
+                  >
+                    <Package className="w-4 h-4" /> Record PC Offer
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -729,7 +756,11 @@ export default function SerialsPage() {
             <p className="text-center text-red-500 py-20">{salesError}</p>
           ) : sales.length === 0 ? (
             <p className="text-center text-slate-500 dark:text-slate-400 py-20">
-              {search ? `No results for "${search}".` : 'No sales recorded yet.'}
+              {search
+                ? `No results for "${search}".`
+                : tab === 'out-distributor'
+                ? 'No distributor sales recorded yet.'
+                : 'No client sales recorded yet.'}
             </p>
           ) : (
             <div className="bg-white dark:bg-[#161b22] border border-slate-200 dark:border-slate-800/80 rounded-2xl overflow-hidden shadow-sm">
@@ -739,6 +770,9 @@ export default function SerialsPage() {
                     <tr className="border-b border-slate-100 dark:border-slate-800 text-left">
                       <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Serial</th>
                       <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">SKU / Product</th>
+                      {tab === 'out-distributor' && (
+                        <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Distributor</th>
+                      )}
                       <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Sale Price</th>
                       <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Warranty</th>
                       <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Sold</th>
@@ -755,6 +789,11 @@ export default function SerialsPage() {
                             {s.product_name || s.sku}
                             <span className="block text-[10px] text-slate-400 font-mono">{s.sku}</span>
                           </td>
+                          {tab === 'out-distributor' && (
+                            <td className="px-4 py-3 text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                              {s.distributor_name || '—'}
+                            </td>
+                          )}
                           <td className="px-4 py-3 font-mono text-slate-700 dark:text-slate-300 whitespace-nowrap">${Number(s.sale_price).toFixed(2)}</td>
                           <td className="px-4 py-3 whitespace-nowrap">
                             {s.warranty_months ? (
@@ -1028,7 +1067,7 @@ export default function SerialsPage() {
       )}
 
       {outFormOpen && (
-        <Modal title="Record a Sale" onClose={() => !outSaving && setOutFormOpen(false)}>
+        <Modal title={tab === 'out-distributor' ? 'Record a Distributor Sale' : 'Record a Sale'} onClose={() => !outSaving && setOutFormOpen(false)}>
           <form onSubmit={submitOut} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Product</label>
@@ -1096,6 +1135,29 @@ export default function SerialsPage() {
               />
             </div>
 
+            {tab === 'out-distributor' && (
+              <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Distributor</label>
+                <select
+                  value={outForm.distributor_id || ''}
+                  onChange={(e) => setOutForm((p) => ({ ...p, distributor_id: e.target.value }))}
+                  className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="">Select distributor</option>
+                  {distributors.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
+                  ))}
+                </select>
+                {distributors.length === 0 && (
+                  <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5">
+                    No distributors registered yet — add one under "Distributor Profiles" first.
+                  </p>
+                )}
+              </div>
+            )}
+
             {outError && (
               <div className="text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl p-3">
                 {outError}
@@ -1117,7 +1179,7 @@ export default function SerialsPage() {
                 className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-60"
               >
                 {outSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                Record Sale
+                {tab === 'out-distributor' ? 'Record Distributor Sale' : 'Record Sale'}
               </button>
             </div>
           </form>

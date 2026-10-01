@@ -10,6 +10,7 @@ import ProductsPage from './pages/ProductsPage';
 import CategoriesPage from './pages/CategoriesPage';
 import SubcategoriesPage from './pages/SubcategoriesPage';
 import BrandsPage from './pages/BrandsPage';
+import DistributorsPage from './pages/DistributorsPage';
 import BannersPage from './pages/BannersPage';
 import OrdersPage from './pages/OrdersPage';
 import SettingsPage from './pages/SettingsPage';
@@ -38,6 +39,7 @@ export default function App() {
             <Route path="categories" element={<CategoriesPage />} />
             <Route path="subcategories" element={<SubcategoriesPage />} />
             <Route path="brands" element={<BrandsPage />} />
+            <Route path="distributors" element={<DistributorsPage />} />
             <Route path="banners" element={<BannersPage />} />
             <Route path="orders" element={<OrdersPage />} />
             <Route path="settings" element={<SettingsPage />} />
