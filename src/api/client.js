@@ -33,4 +33,22 @@ client.interceptors.response.use(
   }
 );
 
+// Admin list endpoints are paginated (the server caps a page at 100 rows),
+// so anything that needs the complete list — a dropdown of every brand or
+// product, the full stock summary — must walk every page rather than take
+// the first one. Otherwise items past the first page silently disappear
+// from pickers.
+const MAX_PAGE_SIZE = 100;
+
+export async function fetchAllPages(path, params = {}) {
+  const all = [];
+
+  for (let page = 1; ; page += 1) {
+    const res = await client.get(path, { params: { ...params, page, limit: MAX_PAGE_SIZE } });
+    all.push(...(res.data?.data || []));
+    const totalPages = res.data?.pagination?.totalPages || 1;
+    if (page >= totalPages) return all;
+  }
+}
+
 export default client;

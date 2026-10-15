@@ -16,8 +16,12 @@ import {
   ScanBarcode,
   Package,
   X,
+  Pencil,
+  ListChecks,
+  Info,
+  AlertTriangle,
 } from 'lucide-react';
-import client from '../api/client';
+import client, { fetchAllPages } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import Modal from '../components/Modal';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -32,7 +36,9 @@ const TABS = [
 // Shared control for "pick a listed product, or type a SKU that isn't
 // listed on the site yet" - used by both the Stock In and Sale forms.
 function ProductOrSkuPicker({ products, productId, sku, onProductChange, onSkuChange }) {
-  const [useManualSku, setUseManualSku] = useState(!productId);
+  // Start on "Listed Product" for a blank form; only start in manual mode
+  // when there's already a typed SKU with no product behind it.
+  const [useManualSku, setUseManualSku] = useState(Boolean(sku) && !productId);
 
   return (
     <div>
@@ -97,7 +103,20 @@ function ProductOrSkuPicker({ products, productId, sku, onProductChange, onSkuCh
   );
 }
 
-const EMPTY_IN = { product_id: null, sku: '', quantity: '', cost_price: '', source: '', notes: '' };
+// mode: 'quantity' logs N units with no serials; 'serial' logs one unit per
+// serial number entered (quantity = how many serials were added).
+const EMPTY_IN = { mode: 'quantity', product_id: null, sku: '', quantity: '', cost_price: '', source: '', notes: '', serial_numbers: [] };
+const EMPTY_OFFER_EDIT = { warranty_months: '', sale_price: '', order_id: '', notes: '' };
+
+// Split pasted/scanned input into individual serials: one per line, or
+// separated by commas/semicolons/tabs. Normalized the same way the server
+// stores them (trimmed, uppercase) so duplicates are caught before saving.
+function parseSerials(raw) {
+  return String(raw || '')
+    .split(/[\n,;\t]+/)
+    .map((sn) => sn.trim().toUpperCase())
+    .filter(Boolean);
+}
 const EMPTY_OUT = { product_id: null, sku: '', serial_number: '', warranty_months: '', sale_price: '', order_id: '', distributor_id: '', notes: '' };
 const EMPTY_OFFER_ITEM = { product_id: null, sku: '', serial_number: '' };
 const EMPTY_OFFER = { items: [{ ...EMPTY_OFFER_ITEM }], sale_price: '', warranty_months: '', order_id: '', notes: '' };
@@ -126,6 +145,8 @@ export default function SerialsPage() {
   const [inSaving, setInSaving] = useState(false);
   const [deleteReceiptTarget, setDeleteReceiptTarget] = useState(null);
   const [deletingReceipt, setDeletingReceipt] = useState(false);
+  const [serialDraft, setSerialDraft] = useState('');
+  const [expandedReceiptId, setExpandedReceiptId] = useState(null);
 
   const [sales, setSales] = useState([]);
   const [salesLoading, setSalesLoading] = useState(true);
@@ -140,6 +161,10 @@ export default function SerialsPage() {
   const [outSaving, setOutSaving] = useState(false);
   const [deleteSaleTarget, setDeleteSaleTarget] = useState(null);
   const [deletingSale, setDeletingSale] = useState(false);
+  // What the sale form found when it looked the typed serial up in the
+  // stock-in log: the receipt it arrived on, or { notFound: true }.
+  const [saleSerialInfo, setSaleSerialInfo] = useState(null);
+  const [salePickerKey, setSalePickerKey] = useState(0);
 
   // PC Offers state
   const [offers, setOffers] = useState([]);
@@ -155,12 +180,15 @@ export default function SerialsPage() {
   const [offerSaving, setOfferSaving] = useState(false);
   const [deleteOfferTarget, setDeleteOfferTarget] = useState(null);
   const [deletingOffer, setDeletingOffer] = useState(false);
+  const [editOfferTarget, setEditOfferTarget] = useState(null);
+  const [editOfferForm, setEditOfferForm] = useState(EMPTY_OFFER_EDIT);
+  const [editOfferError, setEditOfferError] = useState(null);
+  const [editOfferSaving, setEditOfferSaving] = useState(false);
 
   const loadProducts = useCallback(async () => {
     if (products.length > 0) return;
     try {
-      const res = await client.get('/api/admin/products', { params: { limit: 200 } });
-      setProducts(res.data?.data || []);
+      setProducts(await fetchAllPages('/api/admin/products'));
     } catch (err) {
       console.error('Failed to load products:', err);
     }
@@ -169,8 +197,7 @@ export default function SerialsPage() {
   const loadDistributors = useCallback(async () => {
     if (distributors.length > 0) return;
     try {
-      const res = await client.get('/api/admin/distributors', { params: { limit: 200 } });
-      setDistributors(res.data?.data || []);
+      setDistributors(await fetchAllPages('/api/admin/distributors'));
     } catch (err) {
       console.error('Failed to load distributors:', err);
     }
@@ -179,8 +206,7 @@ export default function SerialsPage() {
   const fetchInventorySummary = useCallback(async () => {
     setInventorySummaryLoading(true);
     try {
-      const res = await client.get('/api/admin/inventory-summary', { params: { limit: 100 } });
-      setInventorySummary(res.data?.data || []);
+      setInventorySummary(await fetchAllPages('/api/admin/inventory-summary'));
     } catch (err) {
       console.error('Failed to load inventory summary:', err);
     } finally {
@@ -197,7 +223,7 @@ export default function SerialsPage() {
     setReceiptsError(null);
     try {
       const params = { page: receiptsPage, limit: 20 };
-      if (sourceSearch) params.source = sourceSearch;
+      if (sourceSearch) params.q = sourceSearch;
       const res = await client.get('/api/admin/stock-receipts', { params });
       setReceipts(res.data?.data || []);
       setReceiptsPagination(res.data?.pagination || null);
@@ -343,6 +369,50 @@ export default function SerialsPage() {
     }
   };
 
+  const openEditOffer = (offer) => {
+    setEditOfferTarget(offer);
+    setEditOfferForm({
+      warranty_months: offer.warranty_months ?? '',
+      sale_price: offer.sale_price ?? '',
+      order_id: offer.order_id ?? '',
+      notes: offer.notes ?? '',
+    });
+    setEditOfferError(null);
+  };
+
+  const submitEditOffer = async (e) => {
+    e.preventDefault();
+    setEditOfferError(null);
+
+    const { warranty_months, sale_price, order_id, notes } = editOfferForm;
+    if (warranty_months !== '' && (!Number.isInteger(Number(warranty_months)) || Number(warranty_months) < 0)) {
+      setEditOfferError('Warranty must be a whole number of months (or empty for none).');
+      return;
+    }
+    if (sale_price === '' || Number(sale_price) < 0) {
+      setEditOfferError('Sale price for the whole offer is required.');
+      return;
+    }
+
+    setEditOfferSaving(true);
+    try {
+      const res = await client.patch(`/api/admin/pc-offers/${editOfferTarget.id}`, {
+        warranty_months: warranty_months === '' ? null : Number(warranty_months),
+        sale_price: Number(sale_price),
+        order_id: order_id === '' ? null : Number(order_id),
+        notes,
+      });
+      if (expandedOfferId === editOfferTarget.id) setExpandedOfferDetail(res.data?.data);
+      setEditOfferTarget(null);
+      await fetchOffers();
+    } catch (err) {
+      console.error('Failed to update PC offer:', err);
+      setEditOfferError(err.response?.data?.message || 'Failed to save.');
+    } finally {
+      setEditOfferSaving(false);
+    }
+  };
+
   const confirmDeleteOffer = async () => {
     setDeletingOffer(true);
     try {
@@ -363,21 +433,63 @@ export default function SerialsPage() {
 
   const openInForm = () => {
     setInForm(EMPTY_IN);
+    setSerialDraft('');
     setInError(null);
     setInFormOpen(true);
     loadProducts();
+  };
+
+  // Add one or more serials (a barcode scanner "types" the serial and then
+  // presses Enter; a pasted list may hold many). Already-added ones are
+  // skipped and reported instead of silently duplicated.
+  const addInSerials = (raw) => {
+    const incoming = parseSerials(raw);
+    if (incoming.length === 0) return;
+
+    const existing = new Set(inForm.serial_numbers);
+    const added = [];
+    const dupes = [];
+    for (const sn of incoming) {
+      if (existing.has(sn)) dupes.push(sn);
+      else {
+        existing.add(sn);
+        added.push(sn);
+      }
+    }
+
+    setInForm((p) => ({ ...p, serial_numbers: [...p.serial_numbers, ...added] }));
+    setSerialDraft('');
+    setInError(dupes.length ? `Already in the list: ${dupes.join(', ')}` : null);
+  };
+
+  const removeInSerial = (sn) => {
+    setInForm((p) => ({ ...p, serial_numbers: p.serial_numbers.filter((x) => x !== sn) }));
   };
 
   const submitIn = async (e) => {
     e.preventDefault();
     setInError(null);
 
+    const bySerial = inForm.mode === 'serial';
+
+    // A serial still sitting in the input box (typed but "Add" not pressed)
+    // counts too — staff shouldn't lose the last one they scanned.
+    let serials = inForm.serial_numbers;
+    if (bySerial && serialDraft.trim()) {
+      const extra = parseSerials(serialDraft).filter((sn) => !serials.includes(sn));
+      serials = [...serials, ...extra];
+    }
+
     if (!inForm.sku.trim()) {
       setInError('Pick a product or type a SKU.');
       return;
     }
-    if (!inForm.quantity || Number(inForm.quantity) <= 0) {
-      setInError('Quantity must be a positive number.');
+    if (bySerial && serials.length === 0) {
+      setInError('Add at least one serial number.');
+      return;
+    }
+    if (!bySerial && (!Number.isInteger(Number(inForm.quantity)) || Number(inForm.quantity) <= 0)) {
+      setInError('Quantity must be a whole number above zero.');
       return;
     }
     if (inForm.cost_price === '' || Number(inForm.cost_price) < 0) {
@@ -388,12 +500,15 @@ export default function SerialsPage() {
     setInSaving(true);
     try {
       await client.post('/api/admin/stock-receipts', {
-        ...inForm,
         product_id: inForm.product_id ? Number(inForm.product_id) : null,
-        quantity: Number(inForm.quantity),
+        sku: inForm.sku,
         cost_price: Number(inForm.cost_price),
+        source: inForm.source,
+        notes: inForm.notes,
+        ...(bySerial ? { serial_numbers: serials } : { quantity: Number(inForm.quantity) }),
       });
       setInFormOpen(false);
+      setSerialDraft('');
       setReceiptsPage(1);
       await fetchReceipts();
       fetchInventorySummary();
@@ -421,10 +536,33 @@ export default function SerialsPage() {
 
   const openOutForm = () => {
     setOutForm(EMPTY_OUT);
+    setSaleSerialInfo(null);
     setOutError(null);
     setOutFormOpen(true);
     loadProducts();
     if (tab === 'out-distributor') loadDistributors();
+  };
+
+  // When staff type/scan the serial of the unit being sold, check whether it
+  // was logged on a stock-in. If so, show where it came from and, if no
+  // product has been picked yet, fill the product in from that receipt.
+  const lookupSaleSerial = async (raw) => {
+    const sn = raw.trim();
+    setSaleSerialInfo(null);
+    if (!sn) return;
+
+    try {
+      const res = await client.get(`/api/admin/stock-in-serials/${encodeURIComponent(sn)}`);
+      const info = res.data?.data;
+      setSaleSerialInfo(info);
+      if (!outForm.sku.trim() && info?.sku) {
+        setOutForm((p) => ({ ...p, product_id: info.product_id ? String(info.product_id) : null, sku: info.sku }));
+        setSalePickerKey((k) => k + 1);
+      }
+    } catch (err) {
+      if (err.response?.status === 404) setSaleSerialInfo({ notFound: true });
+      else console.error('Serial lookup failed:', err);
+    }
   };
 
   const submitOut = async (e) => {
@@ -596,7 +734,7 @@ export default function SerialsPage() {
                   type="text"
                   value={sourceSearchInput}
                   onChange={(e) => setSourceSearchInput(e.target.value)}
-                  placeholder="Search by source (e.g. supplier name)..."
+                  placeholder="Search by source, SKU or serial number..."
                   className="w-full bg-white dark:bg-[#161b22] border border-slate-200 dark:border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500 transition-colors"
                 />
               </div>
@@ -626,7 +764,7 @@ export default function SerialsPage() {
             <p className="text-center text-red-500 py-20">{receiptsError}</p>
           ) : receipts.length === 0 ? (
             <p className="text-center text-slate-500 dark:text-slate-400 py-20">
-              {sourceSearch ? `No stock received from "${sourceSearch}".` : 'No stock received yet.'}
+              {sourceSearch ? `No stock-in matches "${sourceSearch}".` : 'No stock received yet.'}
             </p>
           ) : (
             <div className="bg-white dark:bg-[#161b22] border border-slate-200 dark:border-slate-800/80 rounded-2xl overflow-hidden shadow-sm">
@@ -644,8 +782,12 @@ export default function SerialsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {receipts.map((r) => (
-                      <tr key={r.id} className="border-b border-slate-50 dark:border-slate-800/50 last:border-0">
+                    {receipts.map((r) => {
+                      const serialList = r.serial_numbers || [];
+                      const showSerials = expandedReceiptId === r.id;
+                      return (
+                      <React.Fragment key={r.id}>
+                      <tr className="border-b border-slate-50 dark:border-slate-800/50 last:border-0">
                         <td className="px-4 py-3 whitespace-nowrap">
                           <span className="font-semibold text-slate-900 dark:text-white">{r.product_name || r.sku}</span>
                           {r.product_name && <span className="block text-[10px] text-slate-400 font-mono">{r.sku}</span>}
@@ -655,7 +797,18 @@ export default function SerialsPage() {
                             </span>
                           )}
                         </td>
-                        <td className="px-4 py-3 font-mono text-slate-700 dark:text-slate-300 whitespace-nowrap">{r.quantity}</td>
+                        <td className="px-4 py-3 font-mono text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                          {r.quantity}
+                          {serialList.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setExpandedReceiptId(showSerials ? null : r.id)}
+                              className="ml-2 inline-flex items-center gap-1 font-sans text-[10px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 px-1.5 py-0.5 rounded-full hover:bg-indigo-100 dark:hover:bg-indigo-500/20"
+                            >
+                              <ListChecks className="w-3 h-3" /> {showSerials ? 'hide' : 'serials'}
+                            </button>
+                          )}
+                        </td>
                         <td className="px-4 py-3 font-mono text-slate-700 dark:text-slate-300 whitespace-nowrap">${Number(r.cost_price).toFixed(2)}</td>
                         <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400 max-w-[160px] truncate">{r.source || '—'}</td>
                         <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400 max-w-[200px] truncate">{r.notes || '—'}</td>
@@ -673,7 +826,28 @@ export default function SerialsPage() {
                           </td>
                         )}
                       </tr>
-                    ))}
+                      {showSerials && (
+                        <tr className="border-b border-slate-50 dark:border-slate-800/50 bg-slate-50/60 dark:bg-[#0d1117]/60">
+                          <td colSpan={canManage ? 7 : 6} className="px-4 py-3">
+                            <p className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 mb-2">
+                              {serialList.length} serial number{serialList.length !== 1 ? 's' : ''} received on this stock-in
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {serialList.map((sn) => (
+                                <span
+                                  key={sn}
+                                  className="font-mono text-[11px] text-slate-700 dark:text-slate-300 bg-white dark:bg-[#161b22] border border-slate-200 dark:border-slate-800 px-2 py-0.5 rounded-md"
+                                >
+                                  {sn}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </React.Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -782,9 +956,21 @@ export default function SerialsPage() {
                   <tbody>
                     {sales.map((s) => {
                       const isUnderWarranty = s.warranty_expires_at && new Date(s.warranty_expires_at) > new Date();
+                      // Units sold inside a PC Offer have no price of their own (the
+                      // offer carries one combined price) and are removed by deleting
+                      // the offer, so they're labelled instead of showing $0.00.
+                      const isOfferItem = Boolean(s.offer_id);
+                      const warrantyMonths = s.warranty_months ?? s.offer_warranty_months;
                       return (
                         <tr key={s.id} className="border-b border-slate-50 dark:border-slate-800/50 last:border-0">
-                          <td className="px-4 py-3 font-mono font-semibold text-slate-900 dark:text-white whitespace-nowrap">{s.serial_number}</td>
+                          <td className="px-4 py-3 whitespace-nowrap">
+                            <span className="font-mono font-semibold text-slate-900 dark:text-white">{s.serial_number || '—'}</span>
+                            {s.stock_in_receipt_id && (
+                              <span className="block text-[10px] text-slate-400 mt-0.5" title={`Cost $${Number(s.stock_in_cost_price).toFixed(2)}`}>
+                                IN: {s.stock_in_source || 'no source'} · {new Date(s.stock_in_received_at).toLocaleDateString()}
+                              </span>
+                            )}
+                          </td>
                           <td className="px-4 py-3 whitespace-nowrap">
                             {s.product_name || s.sku}
                             <span className="block text-[10px] text-slate-400 font-mono">{s.sku}</span>
@@ -794,9 +980,17 @@ export default function SerialsPage() {
                               {s.distributor_name || '—'}
                             </td>
                           )}
-                          <td className="px-4 py-3 font-mono text-slate-700 dark:text-slate-300 whitespace-nowrap">${Number(s.sale_price).toFixed(2)}</td>
+                          <td className="px-4 py-3 font-mono text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                            {isOfferItem ? (
+                              <span className="inline-flex items-center gap-1 font-sans text-[11px] font-bold text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-500/10 px-2 py-0.5 rounded-full">
+                                <Package className="w-3 h-3" /> PC Offer #{s.offer_id}
+                              </span>
+                            ) : (
+                              `$${Number(s.sale_price).toFixed(2)}`
+                            )}
+                          </td>
                           <td className="px-4 py-3 whitespace-nowrap">
-                            {s.warranty_months ? (
+                            {warrantyMonths ? (
                               <span
                                 className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ${
                                   isUnderWarranty
@@ -805,7 +999,7 @@ export default function SerialsPage() {
                                 }`}
                               >
                                 {isUnderWarranty ? <ShieldCheck className="w-3 h-3" /> : <ShieldAlert className="w-3 h-3" />}
-                                {s.warranty_months}mo
+                                {warrantyMonths}mo
                               </span>
                             ) : (
                               <span className="text-xs text-slate-400">—</span>
@@ -817,12 +1011,18 @@ export default function SerialsPage() {
                           </td>
                           {canManage && (
                             <td className="px-4 py-3 text-right whitespace-nowrap">
+                              {isOfferItem ? (
+                                <span className="text-[10px] text-slate-400" title="Edit or delete this unit from the PC Offers tab">
+                                  via offer
+                                </span>
+                              ) : (
                               <button
                                 onClick={() => setDeleteSaleTarget(s)}
                                 className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
+                              )}
                             </td>
                           )}
                         </tr>
@@ -870,7 +1070,7 @@ export default function SerialsPage() {
             <p className="text-center text-red-500 py-20">{offersError}</p>
           ) : offers.length === 0 ? (
             <p className="text-center text-slate-500 dark:text-slate-400 py-20">
-              No PC offers recorded yet. Use "Record PC Offer" from the Sales & Warranty tab.
+              No PC offers recorded yet. Use "Record PC Offer" from the Client Sales tab.
             </p>
           ) : (
             <div className="space-y-3">
@@ -896,6 +1096,7 @@ export default function SerialsPage() {
                           <p className="text-xs text-slate-400 dark:text-slate-500">
                             {new Date(offer.sold_at).toLocaleDateString()}
                             {offer.order_id && ` · Order #${offer.order_id}`}
+                            {` · ${offer.warranty_months != null ? `${offer.warranty_months}mo warranty` : 'no warranty'}`}
                           </p>
                         </div>
                       </div>
@@ -918,6 +1119,16 @@ export default function SerialsPage() {
                             {expandedOfferDetail.notes && (
                               <p className="text-xs text-slate-500 dark:text-slate-400">{expandedOfferDetail.notes}</p>
                             )}
+                            <p className="text-xs text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                              {expandedOfferDetail.warranty_months != null
+                                ? (() => {
+                                    const until = new Date(expandedOfferDetail.sold_at);
+                                    until.setMonth(until.getMonth() + Number(expandedOfferDetail.warranty_months));
+                                    return `${expandedOfferDetail.warranty_months}-month warranty, until ${until.toLocaleDateString()}`;
+                                  })()
+                                : 'No warranty set'}
+                            </p>
                             <div className="space-y-1.5">
                               {expandedOfferDetail.items.map((item) => (
                                 <div key={item.id} className="flex items-center justify-between text-sm">
@@ -934,7 +1145,13 @@ export default function SerialsPage() {
                               ))}
                             </div>
                             {canManage && (
-                              <div className="flex justify-end pt-2 border-t border-slate-200 dark:border-slate-800">
+                              <div className="flex justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+                                <button
+                                  onClick={() => openEditOffer(expandedOfferDetail)}
+                                  className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 transition-colors"
+                                >
+                                  <Pencil className="w-3.5 h-3.5" /> Edit Offer
+                                </button>
                                 <button
                                   onClick={() => setDeleteOfferTarget(offer)}
                                   className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
@@ -992,30 +1209,129 @@ export default function SerialsPage() {
                 onSkuChange={(sku) => setInForm((p) => ({ ...p, sku }))}
               />
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">How are you logging it?</label>
+              <div className="flex gap-2">
+                {[
+                  { key: 'quantity', label: 'Add quantity' },
+                  { key: 'serial', label: 'By serial number' },
+                ].map((m) => (
+                  <button
+                    key={m.key}
+                    type="button"
+                    onClick={() => {
+                      setInForm((p) => ({ ...p, mode: m.key }));
+                      setInError(null);
+                    }}
+                    className={`flex-1 text-xs font-semibold px-3 py-2 rounded-lg border transition-colors ${
+                      inForm.mode === m.key
+                        ? 'bg-indigo-600 border-indigo-600 text-white'
+                        : 'bg-white dark:bg-transparent border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5">
+                {inForm.mode === 'serial'
+                  ? 'One unit per serial number. Each serial is linked to this source, so a warranty claim can be traced back to where the unit came from.'
+                  : 'Just the number of units received — no serial numbers recorded.'}
+              </p>
+            </div>
+
+            {inForm.mode === 'serial' ? (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400">Serial Numbers</label>
+                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                    Quantity: <span className="font-mono text-slate-900 dark:text-white">{inForm.serial_numbers.length}</span>
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    autoFocus
+                    value={serialDraft}
+                    onChange={(e) => setSerialDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Enter adds the serial (and is what barcode scanners send)
+                      // instead of submitting the whole form.
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addInSerials(serialDraft);
+                      }
+                    }}
+                    onPaste={(e) => {
+                      const text = e.clipboardData.getData('text');
+                      if (parseSerials(text).length > 1) {
+                        e.preventDefault();
+                        addInSerials(text);
+                      }
+                    }}
+                    placeholder="Type or scan a serial, then press Add"
+                    className="flex-1 bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => addInSerials(serialDraft)}
+                    disabled={!serialDraft.trim()}
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-slate-900 dark:bg-white text-white dark:text-slate-900 disabled:opacity-40 transition-colors shrink-0"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add
+                  </button>
+                </div>
+                {inForm.serial_numbers.length > 0 ? (
+                  <div className="flex flex-wrap gap-1.5 mt-2.5 max-h-40 overflow-y-auto">
+                    {inForm.serial_numbers.map((sn) => (
+                      <span
+                        key={sn}
+                        className="inline-flex items-center gap-1 font-mono text-[11px] text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 pl-2 pr-1 py-0.5 rounded-md"
+                      >
+                        {sn}
+                        <button
+                          type="button"
+                          onClick={() => removeInSerial(sn)}
+                          className="p-0.5 rounded text-slate-400 hover:text-red-600 dark:hover:text-red-400"
+                          title="Remove"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5">
+                    You can also paste a list (one serial per line, or comma-separated).
+                  </p>
+                )}
+              </div>
+            ) : (
               <div>
                 <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Quantity</label>
                 <input
                   type="number"
                   min="1"
+                  step="1"
                   value={inForm.quantity}
                   onChange={(e) => setInForm((p) => ({ ...p, quantity: e.target.value }))}
                   placeholder="e.g. 10"
                   className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
                 />
               </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Cost Price (per unit)</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={inForm.cost_price}
-                  onChange={(e) => setInForm((p) => ({ ...p, cost_price: e.target.value }))}
-                  placeholder="e.g. 60.50"
-                  className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
+            )}
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Cost Price (per unit)</label>
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={inForm.cost_price}
+                onChange={(e) => setInForm((p) => ({ ...p, cost_price: e.target.value }))}
+                placeholder="e.g. 60.50"
+                className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+              />
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Source (optional)</label>
@@ -1072,6 +1388,7 @@ export default function SerialsPage() {
             <div>
               <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Product</label>
               <ProductOrSkuPicker
+                key={salePickerKey}
                 products={products}
                 productId={outForm.product_id}
                 sku={outForm.sku}
@@ -1084,10 +1401,40 @@ export default function SerialsPage() {
               <input
                 type="text"
                 value={outForm.serial_number}
-                onChange={(e) => setOutForm((p) => ({ ...p, serial_number: e.target.value }))}
+                onChange={(e) => {
+                  setOutForm((p) => ({ ...p, serial_number: e.target.value }));
+                  setSaleSerialInfo(null);
+                }}
+                onBlur={(e) => lookupSaleSerial(e.target.value)}
                 placeholder="e.g. SN-ABC123456"
                 className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
               />
+              {saleSerialInfo && !saleSerialInfo.notFound && (
+                <div className="mt-1.5 space-y-1">
+                  <p className="text-[11px] text-emerald-600 dark:text-emerald-400 flex items-start gap-1">
+                    <Info className="w-3 h-3 mt-0.5 shrink-0" />
+                    Came in {new Date(saleSerialInfo.received_at).toLocaleDateString()}
+                    {saleSerialInfo.source ? ` from ${saleSerialInfo.source}` : ''} at $
+                    {Number(saleSerialInfo.cost_price).toFixed(2)} ({saleSerialInfo.product_name || saleSerialInfo.sku})
+                  </p>
+                  {saleSerialInfo.sold && (
+                    <p className="text-[11px] text-red-600 dark:text-red-400 flex items-start gap-1">
+                      <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" /> This serial is already recorded as sold.
+                    </p>
+                  )}
+                  {outForm.sku.trim() && outForm.sku.trim() !== saleSerialInfo.sku && (
+                    <p className="text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-1">
+                      <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" /> It was logged in under SKU {saleSerialInfo.sku}, not{' '}
+                      {outForm.sku.trim()}.
+                    </p>
+                  )}
+                </div>
+              )}
+              {saleSerialInfo?.notFound && (
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5">
+                  Not logged on any stock-in by serial (fine if that stock was logged by quantity).
+                </p>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -1313,6 +1660,87 @@ export default function SerialsPage() {
               >
                 {offerSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 Record PC Offer
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {editOfferTarget && (
+        <Modal title={`Edit PC Offer #${editOfferTarget.id}`} onClose={() => !editOfferSaving && setEditOfferTarget(null)}>
+          <form onSubmit={submitEditOffer} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Warranty (months)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  autoFocus
+                  value={editOfferForm.warranty_months}
+                  onChange={(e) => setEditOfferForm((p) => ({ ...p, warranty_months: e.target.value }))}
+                  placeholder="Empty = no warranty"
+                  className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Total Sale Price</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={editOfferForm.sale_price}
+                  onChange={(e) => setEditOfferForm((p) => ({ ...p, sale_price: e.target.value }))}
+                  className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-400 dark:text-slate-500 -mt-2">
+              The warranty applies to every item in this offer and is counted from the sale date
+              {editOfferTarget.sold_at ? ` (${new Date(editOfferTarget.sold_at).toLocaleDateString()})` : ''}.
+            </p>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Order ID (optional)</label>
+              <input
+                type="number"
+                value={editOfferForm.order_id}
+                onChange={(e) => setEditOfferForm((p) => ({ ...p, order_id: e.target.value }))}
+                placeholder="Link to a checkout order, if any"
+                className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Notes (optional)</label>
+              <textarea
+                rows={2}
+                value={editOfferForm.notes}
+                onChange={(e) => setEditOfferForm((p) => ({ ...p, notes: e.target.value }))}
+                className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+
+            {editOfferError && (
+              <div className="text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl p-3">
+                {editOfferError}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setEditOfferTarget(null)}
+                disabled={editOfferSaving}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={editOfferSaving}
+                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-60"
+              >
+                {editOfferSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                Save Changes
               </button>
             </div>
           </form>
