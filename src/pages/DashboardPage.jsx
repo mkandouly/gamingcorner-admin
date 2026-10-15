@@ -34,20 +34,21 @@ export default function DashboardPage() {
     (async () => {
       try {
         const calls = [];
+        // The list endpoints are paginated, so counting the rows of one
+        // response caps every stat at the page size. Ask for a single row
+        // and read the server's total instead.
+        const countOf = (path, params = {}) =>
+          client.get(path, { params: { ...params, limit: 1 } }).then((r) => r.data?.pagination?.total ?? 0);
 
         if (hasPermission('products.view')) {
-          calls.push(client.get('/api/admin/products').then((r) => setProductCount((r.data?.data || []).length)));
+          calls.push(countOf('/api/admin/products').then(setProductCount));
         }
         if (hasPermission('categories.view')) {
-          calls.push(client.get('/api/admin/categories').then((r) => setCategoryCount((r.data?.data || []).length)));
+          calls.push(countOf('/api/admin/categories').then(setCategoryCount));
         }
         if (hasPermission('orders.view')) {
-          calls.push(client.get('/api/admin/orders').then((r) => setTotalOrders((r.data?.data || []).length)));
-          calls.push(
-            client
-              .get('/api/admin/orders', { params: { status: 'pending' } })
-              .then((r) => setPendingOrders((r.data?.data || []).length))
-          );
+          calls.push(countOf('/api/admin/orders').then(setTotalOrders));
+          calls.push(countOf('/api/admin/orders', { status: 'pending' }).then(setPendingOrders));
         }
 
         await Promise.all(calls);

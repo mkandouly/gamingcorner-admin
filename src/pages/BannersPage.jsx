@@ -27,7 +27,7 @@ export default function BannersPage() {
         { name: 'title', label: 'Title', type: 'text', required: true },
         { name: 'image_url', label: 'Banner Image', type: 'image', required: true },
         { name: 'link', label: 'Link (where it goes when clicked)', type: 'text', required: true, placeholder: '/category/peripherals' },
-        { name: 'is_active', label: 'Active', type: 'checkbox', checkboxLabel: 'Show this banner on the storefront' },
+        { name: 'is_active', label: 'Active', type: 'checkbox', default: true, checkboxLabel: 'Show this banner on the storefront' },
       ]}
     />
   );

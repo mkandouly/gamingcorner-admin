@@ -1,7 +1,7 @@
 // src/components/crud/CrudManager.jsx
 import React, { useState, useEffect, useCallback } from 'react';
 import { Plus, Pencil, Trash2, Loader2, Inbox, ChevronLeft, ChevronRight } from 'lucide-react';
-import client, { API_BASE_URL } from '../../api/client';
+import client, { API_BASE_URL, fetchAllPages } from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import Modal from '../Modal';
 import ConfirmDialog from '../ConfirmDialog';
@@ -11,17 +11,26 @@ const PAGE_SIZE = 20;
 
 const resolveImg = (url) => (url?.startsWith('http') ? url : `${API_BASE_URL}${url}`);
 
+// "Categories" -> "Category", "Banners" -> "Banner", for form titles.
+function singularize(title) {
+  if (title.endsWith('ies')) return `${title.slice(0, -3)}y`;
+  if (title.endsWith('s')) return title.slice(0, -1);
+  return title;
+}
+
 function emptyFormFromFields(fields) {
   const obj = {};
   for (const f of fields) {
-    if (f.type === 'checkbox') obj[f.name] = false;
+    if (f.default !== undefined) obj[f.name] = f.default;
+    else if (f.type === 'checkbox') obj[f.name] = false;
     else if (f.type === 'multi-image') obj[f.name] = [];
     else obj[f.name] = '';
   }
   return obj;
 }
 
-export default function CrudManager({ title, permissionPrefix, apiPath, idKey = 'id', columns, fields, extraActions }) {
+export default function CrudManager({ title, singular, permissionPrefix, apiPath, idKey = 'id', columns, fields, extraActions }) {
+  const singularTitle = singular || singularize(title);
   const { hasPermission } = useAuth();
   const canView = hasPermission(`${permissionPrefix}.view`);
   const canCreate = hasPermission(`${permissionPrefix}.create`);
@@ -80,6 +89,8 @@ export default function CrudManager({ title, permissionPrefix, apiPath, idKey = 
 
   // Fetch options for any select fields backed by another resource
   // (e.g. a product's brand dropdown pulling from /api/admin/brands).
+  // Walks every page — the list endpoints are paginated, and taking only
+  // the first page would hide e.g. every brand past the 20th.
   useEffect(() => {
     const selectFields = fields.filter((f) => f.type === 'select' && f.optionsEndpoint);
     if (selectFields.length === 0) return;
@@ -89,8 +100,7 @@ export default function CrudManager({ title, permissionPrefix, apiPath, idKey = 
       const results = {};
       for (const f of selectFields) {
         try {
-          const res = await client.get(f.optionsEndpoint);
-          results[f.name] = res.data?.data || [];
+          results[f.name] = await fetchAllPages(f.optionsEndpoint);
         } catch (err) {
           console.error(`Failed to load options for ${f.name}:`, err);
           results[f.name] = [];
@@ -386,7 +396,7 @@ export default function CrudManager({ title, permissionPrefix, apiPath, idKey = 
       )}
 
       {formOpen && (
-        <Modal title={editingRow ? `Edit ${title.slice(0, -1)}` : `Add ${title.slice(0, -1)}`} onClose={closeForm}>
+        <Modal title={editingRow ? `Edit ${singularTitle}` : `Add ${singularTitle}`} onClose={closeForm}>
           <form onSubmit={handleSubmit} className="space-y-4">
             {fields.map((f) => (
               <div key={f.name}>
@@ -428,7 +438,7 @@ export default function CrudManager({ title, permissionPrefix, apiPath, idKey = 
 
       {deleteTarget && (
         <ConfirmDialog
-          title={`Delete this ${title.slice(0, -1).toLowerCase()}?`}
+          title={`Delete this ${singularTitle.toLowerCase()}?`}
           message="This can't be undone."
           confirmLabel="Delete"
           busy={deleting}
