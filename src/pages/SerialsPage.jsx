@@ -121,6 +121,230 @@ const EMPTY_OUT = { product_id: null, sku: '', serial_number: '', warranty_month
 const EMPTY_OFFER_ITEM = { product_id: null, sku: '', serial_number: '' };
 const EMPTY_OFFER = { items: [{ ...EMPTY_OFFER_ITEM }], sale_price: '', warranty_months: '', order_id: '', notes: '' };
 
+// The items inside one PC Offer, editable in place: change an item's
+// product/SKU or serial number, add an item that was left out, or remove
+// one. Every change is saved immediately and the whole offer comes back
+// from the server, which is handed to onChanged() so the page refreshes.
+const EMPTY_ITEM_DRAFT = { product_id: null, sku: '', serial_number: '' };
+
+function OfferItemsEditor({ offer, products, canManage, onNeedProducts, onChanged }) {
+  const [editingId, setEditingId] = useState(null); // item id, 'new', or null
+  const [draft, setDraft] = useState(EMPTY_ITEM_DRAFT);
+  const [pickerKey, setPickerKey] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [removeTarget, setRemoveTarget] = useState(null);
+  const [removing, setRemoving] = useState(false);
+
+  const items = offer.items || [];
+  const canRemove = items.length > 1;
+
+  const startEdit = (item) => {
+    onNeedProducts();
+    setEditingId(item.id);
+    setDraft({
+      product_id: item.product_id ? String(item.product_id) : null,
+      sku: item.sku || '',
+      serial_number: item.serial_number || '',
+    });
+    setPickerKey((k) => k + 1);
+    setError(null);
+  };
+
+  const startAdd = () => {
+    onNeedProducts();
+    setEditingId('new');
+    setDraft(EMPTY_ITEM_DRAFT);
+    setPickerKey((k) => k + 1);
+    setError(null);
+  };
+
+  const cancel = () => {
+    setEditingId(null);
+    setError(null);
+  };
+
+  const save = async () => {
+    if (!draft.sku.trim()) {
+      setError('Pick a product or type a SKU.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    const payload = {
+      product_id: draft.product_id ? Number(draft.product_id) : null,
+      sku: draft.sku,
+      serial_number: draft.serial_number,
+    };
+    try {
+      const res =
+        editingId === 'new'
+          ? await client.post(`/api/admin/pc-offers/${offer.id}/items`, payload)
+          : await client.patch(`/api/admin/pc-offers/${offer.id}/items/${editingId}`, payload);
+      setEditingId(null);
+      onChanged(res.data?.data);
+    } catch (err) {
+      console.error('Failed to save offer item:', err);
+      setError(err.response?.data?.message || 'Failed to save.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const confirmRemove = async () => {
+    setRemoving(true);
+    try {
+      const res = await client.delete(`/api/admin/pc-offers/${offer.id}/items/${removeTarget.id}`);
+      setRemoveTarget(null);
+      if (editingId === removeTarget.id) setEditingId(null);
+      onChanged(res.data?.data);
+    } catch (err) {
+      console.error('Failed to remove offer item:', err);
+      setRemoveTarget(null);
+      setError(err.response?.data?.message || 'Failed to remove.');
+    } finally {
+      setRemoving(false);
+    }
+  };
+
+  const editor = (
+    <div className="space-y-2 p-3 rounded-xl border border-indigo-200 dark:border-indigo-500/30 bg-white dark:bg-[#161b22]">
+      <p className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wide">
+        {editingId === 'new' ? 'Add item to this offer' : 'Edit item'}
+      </p>
+      <ProductOrSkuPicker
+        key={pickerKey}
+        products={products}
+        productId={draft.product_id}
+        sku={draft.sku}
+        onProductChange={(id, sku) => {
+          setDraft((d) => ({ ...d, product_id: id, sku }));
+          setError(null);
+        }}
+        onSkuChange={(sku) => {
+          setDraft((d) => ({ ...d, sku }));
+          setError(null);
+        }}
+      />
+      <input
+        type="text"
+        value={draft.serial_number}
+        onChange={(e) => {
+          setDraft((d) => ({ ...d, serial_number: e.target.value }));
+          setError(null);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            save();
+          }
+        }}
+        placeholder="Serial number (optional)"
+        className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+      />
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={cancel}
+          disabled={saving}
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-60"
+        >
+          {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+          {editingId === 'new' ? 'Add Item' : 'Save Item'}
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-1.5">
+      {items.map((item) =>
+        editingId === item.id ? (
+          <div key={item.id}>{editor}</div>
+        ) : (
+          <div key={item.id} className="flex items-center justify-between gap-3 text-sm py-0.5">
+            <span className="text-slate-700 dark:text-slate-300 min-w-0">
+              {item.product_name || item.sku}
+              {!item.product_name && (
+                <span className="ml-1.5 text-[10px] font-bold text-amber-600 dark:text-amber-400">not listed</span>
+              )}
+              {item.serial_number ? (
+                <span className="ml-2 font-mono text-xs text-slate-400">{item.serial_number}</span>
+              ) : (
+                <span className="ml-2 text-[11px] text-slate-300 dark:text-slate-600">no serial</span>
+              )}
+            </span>
+            <span className="flex items-center gap-1 shrink-0">
+              {item.warranty_months != null && (
+                <span className="text-[11px] text-slate-400 mr-1">{item.warranty_months}mo warranty</span>
+              )}
+              {canManage && editingId === null && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => startEdit(item)}
+                    title="Edit item"
+                    className="p-1 rounded-lg text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-500/10"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                  </button>
+                  {canRemove && (
+                    <button
+                      type="button"
+                      onClick={() => setRemoveTarget(item)}
+                      title="Remove from offer"
+                      className="p-1 rounded-lg text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </>
+              )}
+            </span>
+          </div>
+        )
+      )}
+
+      {editingId === 'new' && editor}
+
+      {error && <p className="text-[11px] text-red-600 dark:text-red-400">{error}</p>}
+
+      {canManage && editingId === null && (
+        <button
+          type="button"
+          onClick={startAdd}
+          className="w-full mt-1 inline-flex items-center justify-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:border-indigo-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+        >
+          <Plus className="w-3.5 h-3.5" /> Add Item
+        </button>
+      )}
+
+      {removeTarget && (
+        <ConfirmDialog
+          title={`Remove ${removeTarget.product_name || removeTarget.sku} from this offer?`}
+          message={
+            removeTarget.serial_number
+              ? `Its sale and warranty record (serial ${removeTarget.serial_number}) will be deleted. The offer's total price doesn't change — edit it separately if needed.`
+              : "Its sale record will be deleted. The offer's total price doesn't change — edit it separately if needed."
+          }
+          confirmLabel="Remove"
+          busy={removing}
+          onConfirm={confirmRemove}
+          onCancel={() => setRemoveTarget(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function SerialsPage() {
   const { hasPermission } = useAuth();
   const canView = hasPermission('serials.view');
@@ -1129,21 +1353,17 @@ export default function SerialsPage() {
                                   })()
                                 : 'No warranty set'}
                             </p>
-                            <div className="space-y-1.5">
-                              {expandedOfferDetail.items.map((item) => (
-                                <div key={item.id} className="flex items-center justify-between text-sm">
-                                  <span className="text-slate-700 dark:text-slate-300">
-                                    {item.product_name || item.sku}
-                                    {item.serial_number && (
-                                      <span className="ml-2 font-mono text-xs text-slate-400">{item.serial_number}</span>
-                                    )}
-                                  </span>
-                                  {item.warranty_months && (
-                                    <span className="text-[11px] text-slate-400">{item.warranty_months}mo warranty</span>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
+                            <OfferItemsEditor
+                              offer={expandedOfferDetail}
+                              products={products}
+                              canManage={canManage}
+                              onNeedProducts={loadProducts}
+                              onChanged={(updated) => {
+                                if (updated) setExpandedOfferDetail(updated);
+                                fetchOffers();
+                                fetchInventorySummary();
+                              }}
+                            />
                             {canManage && (
                               <div className="flex justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
                                 <button
