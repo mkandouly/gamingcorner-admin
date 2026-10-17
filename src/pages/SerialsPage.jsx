@@ -20,11 +20,17 @@ import {
   ListChecks,
   Info,
   AlertTriangle,
+  StickyNote,
+  Eye,
 } from 'lucide-react';
 import client, { fetchAllPages } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import Modal from '../components/Modal';
 import ConfirmDialog from '../components/ConfirmDialog';
+import { ProductOrSkuPicker } from '../components/inventory/shared';
+import { parseSerials } from '../components/inventory/helpers';
+import DistributorSalesTab from '../components/inventory/DistributorSalesTab';
+import { ClientSaleDetailsModal, ClientSaleEditModal } from '../components/inventory/ClientSaleModals';
 
 const TABS = [
   { key: 'in', label: 'Stock In', icon: ArrowDownToLine },
@@ -33,91 +39,12 @@ const TABS = [
   { key: 'offers', label: 'PC Offers', icon: Package },
 ];
 
-// Shared control for "pick a listed product, or type a SKU that isn't
-// listed on the site yet" - used by both the Stock In and Sale forms.
-function ProductOrSkuPicker({ products, productId, sku, onProductChange, onSkuChange }) {
-  // Start on "Listed Product" for a blank form; only start in manual mode
-  // when there's already a typed SKU with no product behind it.
-  const [useManualSku, setUseManualSku] = useState(Boolean(sku) && !productId);
-
-  return (
-    <div>
-      <div className="flex gap-2 mb-2">
-        <button
-          type="button"
-          onClick={() => {
-            setUseManualSku(false);
-            onSkuChange('');
-          }}
-          className={`flex-1 text-xs font-semibold px-3 py-2 rounded-lg border transition-colors ${
-            !useManualSku
-              ? 'bg-indigo-600 border-indigo-600 text-white'
-              : 'bg-white dark:bg-transparent border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
-          }`}
-        >
-          Listed Product
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setUseManualSku(true);
-            onProductChange(null, '');
-          }}
-          className={`flex-1 text-xs font-semibold px-3 py-2 rounded-lg border transition-colors ${
-            useManualSku
-              ? 'bg-indigo-600 border-indigo-600 text-white'
-              : 'bg-white dark:bg-transparent border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400'
-          }`}
-        >
-          Not Listed (type SKU)
-        </button>
-      </div>
-
-      {useManualSku ? (
-        <input
-          type="text"
-          value={sku}
-          onChange={(e) => onSkuChange(e.target.value)}
-          placeholder="e.g. UNLISTED-SKU-01"
-          className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-        />
-      ) : (
-        <select
-          value={productId || ''}
-          onChange={(e) => {
-            const id = e.target.value;
-            const product = products.find((p) => String(p.id) === id);
-            onProductChange(id || null, product?.sku || '');
-          }}
-          className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-        >
-          <option value="">Select product</option>
-          {products.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name} ({p.sku})
-            </option>
-          ))}
-        </select>
-      )}
-    </div>
-  );
-}
-
 // mode: 'quantity' logs N units with no serials; 'serial' logs one unit per
 // serial number entered (quantity = how many serials were added).
 const EMPTY_IN = { mode: 'quantity', product_id: null, sku: '', quantity: '', cost_price: '', source: '', notes: '', serial_numbers: [] };
 const EMPTY_OFFER_EDIT = { warranty_months: '', sale_price: '', order_id: '', notes: '' };
 
-// Split pasted/scanned input into individual serials: one per line, or
-// separated by commas/semicolons/tabs. Normalized the same way the server
-// stores them (trimmed, uppercase) so duplicates are caught before saving.
-function parseSerials(raw) {
-  return String(raw || '')
-    .split(/[\n,;\t]+/)
-    .map((sn) => sn.trim().toUpperCase())
-    .filter(Boolean);
-}
-const EMPTY_OUT = { product_id: null, sku: '', serial_number: '', warranty_months: '', sale_price: '', order_id: '', distributor_id: '', notes: '' };
+const EMPTY_OUT = { product_id: null, sku: '', serial_number: '', warranty_months: '', sale_price: '', order_id: '', notes: '' };
 const EMPTY_OFFER_ITEM = { product_id: null, sku: '', serial_number: '' };
 const EMPTY_OFFER = { items: [{ ...EMPTY_OFFER_ITEM }], sale_price: '', warranty_months: '', order_id: '', notes: '' };
 
@@ -352,7 +279,9 @@ export default function SerialsPage() {
 
   const [tab, setTab] = useState('in');
   const [products, setProducts] = useState([]);
-  const [distributors, setDistributors] = useState([]);
+  // Client Sales: the sale being looked at (details + notes) or edited.
+  const [viewSale, setViewSale] = useState(null);
+  const [editSale, setEditSale] = useState(null);
 
   const [receipts, setReceipts] = useState([]);
   const [inventorySummary, setInventorySummary] = useState([]);
@@ -418,15 +347,6 @@ export default function SerialsPage() {
     }
   }, [products.length]);
 
-  const loadDistributors = useCallback(async () => {
-    if (distributors.length > 0) return;
-    try {
-      setDistributors(await fetchAllPages('/api/admin/distributors'));
-    } catch (err) {
-      console.error('Failed to load distributors:', err);
-    }
-  }, [distributors.length]);
-
   const fetchInventorySummary = useCallback(async () => {
     setInventorySummaryLoading(true);
     try {
@@ -463,7 +383,7 @@ export default function SerialsPage() {
     setSalesLoading(true);
     setSalesError(null);
     try {
-      const params = { page: salesPage, limit: 20, type: tab === 'out-distributor' ? 'distributor' : 'client' };
+      const params = { page: salesPage, limit: 20, type: 'client' };
       if (search) params.search = search;
       const res = await client.get('/api/admin/serials', { params });
       setSales(res.data?.data || []);
@@ -474,14 +394,14 @@ export default function SerialsPage() {
     } finally {
       setSalesLoading(false);
     }
-  }, [salesPage, search, tab]);
+  }, [salesPage, search]);
 
   useEffect(() => {
     if (canView && tab === 'in') fetchReceipts();
   }, [canView, tab, fetchReceipts]);
 
   useEffect(() => {
-    if (canView && (tab === 'out-client' || tab === 'out-distributor')) fetchSales();
+    if (canView && tab === 'out-client') fetchSales();
   }, [canView, tab, fetchSales]);
 
   useEffect(() => {
@@ -764,7 +684,6 @@ export default function SerialsPage() {
     setOutError(null);
     setOutFormOpen(true);
     loadProducts();
-    if (tab === 'out-distributor') loadDistributors();
   };
 
   // When staff type/scan the serial of the unit being sold, check whether it
@@ -793,8 +712,6 @@ export default function SerialsPage() {
     e.preventDefault();
     setOutError(null);
 
-    const isDistributorSale = tab === 'out-distributor';
-
     if (!outForm.sku.trim()) {
       setOutError('Pick a product or type a SKU.');
       return;
@@ -807,10 +724,6 @@ export default function SerialsPage() {
       setOutError('Sale price is required.');
       return;
     }
-    if (isDistributorSale && !outForm.distributor_id) {
-      setOutError('Pick which distributor this sale is to.');
-      return;
-    }
 
     setOutSaving(true);
     try {
@@ -820,7 +733,6 @@ export default function SerialsPage() {
         warranty_months: outForm.warranty_months ? Number(outForm.warranty_months) : null,
         sale_price: Number(outForm.sale_price),
         order_id: outForm.order_id ? Number(outForm.order_id) : null,
-        distributor_id: isDistributorSale && outForm.distributor_id ? Number(outForm.distributor_id) : null,
       });
       setOutFormOpen(false);
       setSalesPage(1);
@@ -1104,7 +1016,16 @@ export default function SerialsPage() {
         </div>
       )}
 
-      {(tab === 'out-client' || tab === 'out-distributor') && (
+      {tab === 'out-distributor' && (
+        <DistributorSalesTab
+          canManage={canManage}
+          products={products}
+          loadProducts={loadProducts}
+          onInventoryChanged={fetchInventorySummary}
+        />
+      )}
+
+      {tab === 'out-client' && (
         <div>
           <div className="flex justify-between items-center gap-2 mb-4">
             <form onSubmit={handleSearchSubmit} className="flex gap-2 flex-1 max-w-md">
@@ -1114,7 +1035,7 @@ export default function SerialsPage() {
                   type="text"
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
-                  placeholder="Look up a serial number..."
+                  placeholder="Search serial, SKU, product or notes..."
                   className="w-full bg-white dark:bg-[#161b22] border border-slate-200 dark:border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500 transition-colors"
                 />
               </div>
@@ -1132,16 +1053,14 @@ export default function SerialsPage() {
                   onClick={openOutForm}
                   className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
                 >
-                  <Plus className="w-4 h-4" /> {tab === 'out-distributor' ? 'Record Distributor Sale' : 'Record Sale'}
+                  <Plus className="w-4 h-4" /> Record Sale
                 </button>
-                {tab === 'out-client' && (
-                  <button
-                    onClick={openOfferForm}
-                    className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white transition-colors"
-                  >
-                    <Package className="w-4 h-4" /> Record PC Offer
-                  </button>
-                )}
+                <button
+                  onClick={openOfferForm}
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white transition-colors"
+                >
+                  <Package className="w-4 h-4" /> Record PC Offer
+                </button>
               </div>
             )}
           </div>
@@ -1154,11 +1073,7 @@ export default function SerialsPage() {
             <p className="text-center text-red-500 py-20">{salesError}</p>
           ) : sales.length === 0 ? (
             <p className="text-center text-slate-500 dark:text-slate-400 py-20">
-              {search
-                ? `No results for "${search}".`
-                : tab === 'out-distributor'
-                ? 'No distributor sales recorded yet.'
-                : 'No client sales recorded yet.'}
+              {search ? `No results for "${search}".` : 'No client sales recorded yet.'}
             </p>
           ) : (
             <div className="bg-white dark:bg-[#161b22] border border-slate-200 dark:border-slate-800/80 rounded-2xl overflow-hidden shadow-sm">
@@ -1168,13 +1083,11 @@ export default function SerialsPage() {
                     <tr className="border-b border-slate-100 dark:border-slate-800 text-left">
                       <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Serial</th>
                       <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">SKU / Product</th>
-                      {tab === 'out-distributor' && (
-                        <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Distributor</th>
-                      )}
                       <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Sale Price</th>
                       <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Warranty</th>
                       <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Sold</th>
-                      {canManage && <th className="px-4 py-3" />}
+                      <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Notes</th>
+                      <th className="px-4 py-3" />
                     </tr>
                   </thead>
                   <tbody>
@@ -1199,11 +1112,6 @@ export default function SerialsPage() {
                             {s.product_name || s.sku}
                             <span className="block text-[10px] text-slate-400 font-mono">{s.sku}</span>
                           </td>
-                          {tab === 'out-distributor' && (
-                            <td className="px-4 py-3 text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                              {s.distributor_name || '—'}
-                            </td>
-                          )}
                           <td className="px-4 py-3 font-mono text-slate-700 dark:text-slate-300 whitespace-nowrap">
                             {isOfferItem ? (
                               <span className="inline-flex items-center gap-1 font-sans text-[11px] font-bold text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-500/10 px-2 py-0.5 rounded-full">
@@ -1233,22 +1141,59 @@ export default function SerialsPage() {
                           <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
                             {new Date(s.sold_at).toLocaleDateString()}
                           </td>
-                          {canManage && (
-                            <td className="px-4 py-3 text-right whitespace-nowrap">
-                              {isOfferItem ? (
-                                <span className="text-[10px] text-slate-400" title="Edit or delete this unit from the PC Offers tab">
-                                  via offer
-                                </span>
-                              ) : (
+                          <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400 max-w-[220px]">
+                            {s.notes ? (
                               <button
-                                onClick={() => setDeleteSaleTarget(s)}
-                                className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
+                                type="button"
+                                onClick={() => setViewSale(s)}
+                                title={s.notes}
+                                className="flex items-center gap-1 max-w-full text-left hover:text-slate-800 dark:hover:text-slate-200"
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
+                                <StickyNote className="w-3 h-3 shrink-0 text-amber-500" />
+                                <span className="truncate">{s.notes}</span>
                               </button>
-                              )}
-                            </td>
-                          )}
+                            ) : (
+                              <span className="text-slate-300 dark:text-slate-600">—</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-right whitespace-nowrap">
+                            {isOfferItem ? (
+                              <span className="text-[10px] text-slate-400" title="Edit or delete this unit from the PC Offers tab">
+                                via offer
+                              </span>
+                            ) : (
+                              <div className="flex items-center justify-end gap-1">
+                                <button
+                                  onClick={() => setViewSale(s)}
+                                  title="View sale details and notes"
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                </button>
+                                {canManage && (
+                                  <>
+                                    <button
+                                      onClick={() => {
+                                        loadProducts();
+                                        setEditSale(s);
+                                      }}
+                                      title="Edit sale"
+                                      className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 transition-colors"
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      onClick={() => setDeleteSaleTarget(s)}
+                                      title="Delete sale"
+                                      className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </td>
                         </tr>
                       );
                     })}
@@ -1603,7 +1548,7 @@ export default function SerialsPage() {
       )}
 
       {outFormOpen && (
-        <Modal title={tab === 'out-distributor' ? 'Record a Distributor Sale' : 'Record a Sale'} onClose={() => !outSaving && setOutFormOpen(false)}>
+        <Modal title="Record a Sale" onClose={() => !outSaving && setOutFormOpen(false)}>
           <form onSubmit={submitOut} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Product</label>
@@ -1702,29 +1647,6 @@ export default function SerialsPage() {
               />
             </div>
 
-            {tab === 'out-distributor' && (
-              <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
-                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Distributor</label>
-                <select
-                  value={outForm.distributor_id || ''}
-                  onChange={(e) => setOutForm((p) => ({ ...p, distributor_id: e.target.value }))}
-                  className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-                >
-                  <option value="">Select distributor</option>
-                  {distributors.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name}
-                    </option>
-                  ))}
-                </select>
-                {distributors.length === 0 && (
-                  <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5">
-                    No distributors registered yet — add one under "Distributor Profiles" first.
-                  </p>
-                )}
-              </div>
-            )}
-
             {outError && (
               <div className="text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl p-3">
                 {outError}
@@ -1746,7 +1668,7 @@ export default function SerialsPage() {
                 className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-60"
               >
                 {outSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                {tab === 'out-distributor' ? 'Record Distributor Sale' : 'Record Sale'}
+                Record Sale
               </button>
             </div>
           </form>
@@ -1975,6 +1897,32 @@ export default function SerialsPage() {
           busy={deletingReceipt}
           onConfirm={confirmDeleteReceipt}
           onCancel={() => setDeleteReceiptTarget(null)}
+        />
+      )}
+
+      {viewSale && (
+        <ClientSaleDetailsModal
+          sale={viewSale}
+          canEdit={canManage}
+          onClose={() => setViewSale(null)}
+          onEdit={() => {
+            loadProducts();
+            setEditSale(viewSale);
+            setViewSale(null);
+          }}
+        />
+      )}
+
+      {editSale && (
+        <ClientSaleEditModal
+          sale={editSale}
+          products={products}
+          onClose={() => setEditSale(null)}
+          onSaved={() => {
+            setEditSale(null);
+            fetchSales();
+            fetchInventorySummary();
+          }}
         />
       )}
 
