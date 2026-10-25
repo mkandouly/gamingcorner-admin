@@ -8,7 +8,6 @@ import {
   ArrowUpFromLine,
   Truck,
   ShieldCheck,
-  ShieldAlert,
   Trash2,
   ChevronLeft,
   ChevronRight,
@@ -18,10 +17,6 @@ import {
   X,
   Pencil,
   ListChecks,
-  Info,
-  AlertTriangle,
-  StickyNote,
-  Eye,
 } from 'lucide-react';
 import client, { fetchAllPages } from '../api/client';
 import { useAuth } from '../context/AuthContext';
@@ -29,8 +24,7 @@ import Modal from '../components/Modal';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { ProductOrSkuPicker } from '../components/inventory/shared';
 import { parseSerials } from '../components/inventory/helpers';
-import DistributorSalesTab from '../components/inventory/DistributorSalesTab';
-import { ClientSaleDetailsModal, ClientSaleEditModal } from '../components/inventory/ClientSaleModals';
+import SalesTab from '../components/inventory/SalesTab';
 
 const TABS = [
   { key: 'in', label: 'Stock In', icon: ArrowDownToLine },
@@ -44,7 +38,6 @@ const TABS = [
 const EMPTY_IN = { mode: 'quantity', product_id: null, sku: '', quantity: '', cost_price: '', source: '', notes: '', serial_numbers: [] };
 const EMPTY_OFFER_EDIT = { warranty_months: '', sale_price: '', order_id: '', notes: '' };
 
-const EMPTY_OUT = { product_id: null, sku: '', serial_number: '', warranty_months: '', sale_price: '', order_id: '', notes: '' };
 const EMPTY_OFFER_ITEM = { product_id: null, sku: '', serial_number: '' };
 const EMPTY_OFFER = { items: [{ ...EMPTY_OFFER_ITEM }], sale_price: '', warranty_months: '', order_id: '', notes: '' };
 
@@ -279,9 +272,6 @@ export default function SerialsPage() {
 
   const [tab, setTab] = useState('in');
   const [products, setProducts] = useState([]);
-  // Client Sales: the sale being looked at (details + notes) or edited.
-  const [viewSale, setViewSale] = useState(null);
-  const [editSale, setEditSale] = useState(null);
 
   const [receipts, setReceipts] = useState([]);
   const [inventorySummary, setInventorySummary] = useState([]);
@@ -300,24 +290,6 @@ export default function SerialsPage() {
   const [deletingReceipt, setDeletingReceipt] = useState(false);
   const [serialDraft, setSerialDraft] = useState('');
   const [expandedReceiptId, setExpandedReceiptId] = useState(null);
-
-  const [sales, setSales] = useState([]);
-  const [salesLoading, setSalesLoading] = useState(true);
-  const [salesError, setSalesError] = useState(null);
-  const [salesPage, setSalesPage] = useState(1);
-  const [salesPagination, setSalesPagination] = useState(null);
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
-  const [outFormOpen, setOutFormOpen] = useState(false);
-  const [outForm, setOutForm] = useState(EMPTY_OUT);
-  const [outError, setOutError] = useState(null);
-  const [outSaving, setOutSaving] = useState(false);
-  const [deleteSaleTarget, setDeleteSaleTarget] = useState(null);
-  const [deletingSale, setDeletingSale] = useState(false);
-  // What the sale form found when it looked the typed serial up in the
-  // stock-in log: the receipt it arrived on, or { notFound: true }.
-  const [saleSerialInfo, setSaleSerialInfo] = useState(null);
-  const [salePickerKey, setSalePickerKey] = useState(0);
 
   // PC Offers state
   const [offers, setOffers] = useState([]);
@@ -379,38 +351,9 @@ export default function SerialsPage() {
     }
   }, [receiptsPage, sourceSearch]);
 
-  const fetchSales = useCallback(async () => {
-    setSalesLoading(true);
-    setSalesError(null);
-    try {
-      const params = { page: salesPage, limit: 20, type: 'client' };
-      if (search) params.search = search;
-      const res = await client.get('/api/admin/serials', { params });
-      setSales(res.data?.data || []);
-      setSalesPagination(res.data?.pagination || null);
-    } catch (err) {
-      console.error('Failed to load sales:', err);
-      setSalesError(err.response?.data?.message || 'Failed to load.');
-    } finally {
-      setSalesLoading(false);
-    }
-  }, [salesPage, search]);
-
   useEffect(() => {
     if (canView && tab === 'in') fetchReceipts();
   }, [canView, tab, fetchReceipts]);
-
-  useEffect(() => {
-    if (canView && tab === 'out-client') fetchSales();
-  }, [canView, tab, fetchSales]);
-
-  useEffect(() => {
-    setSalesPage(1);
-  }, [tab]);
-
-  useEffect(() => {
-    setSalesPage(1);
-  }, [search]);
 
   const fetchOffers = useCallback(async () => {
     setOffersLoading(true);
@@ -678,93 +621,6 @@ export default function SerialsPage() {
     }
   };
 
-  const openOutForm = () => {
-    setOutForm(EMPTY_OUT);
-    setSaleSerialInfo(null);
-    setOutError(null);
-    setOutFormOpen(true);
-    loadProducts();
-  };
-
-  // When staff type/scan the serial of the unit being sold, check whether it
-  // was logged on a stock-in. If so, show where it came from and, if no
-  // product has been picked yet, fill the product in from that receipt.
-  const lookupSaleSerial = async (raw) => {
-    const sn = raw.trim();
-    setSaleSerialInfo(null);
-    if (!sn) return;
-
-    try {
-      const res = await client.get(`/api/admin/stock-in-serials/${encodeURIComponent(sn)}`);
-      const info = res.data?.data;
-      setSaleSerialInfo(info);
-      if (!outForm.sku.trim() && info?.sku) {
-        setOutForm((p) => ({ ...p, product_id: info.product_id ? String(info.product_id) : null, sku: info.sku }));
-        setSalePickerKey((k) => k + 1);
-      }
-    } catch (err) {
-      if (err.response?.status === 404) setSaleSerialInfo({ notFound: true });
-      else console.error('Serial lookup failed:', err);
-    }
-  };
-
-  const submitOut = async (e) => {
-    e.preventDefault();
-    setOutError(null);
-
-    if (!outForm.sku.trim()) {
-      setOutError('Pick a product or type a SKU.');
-      return;
-    }
-    if (!outForm.serial_number.trim()) {
-      setOutError('Serial number is required.');
-      return;
-    }
-    if (outForm.sale_price === '' || Number(outForm.sale_price) < 0) {
-      setOutError('Sale price is required.');
-      return;
-    }
-
-    setOutSaving(true);
-    try {
-      await client.post('/api/admin/serials', {
-        ...outForm,
-        product_id: outForm.product_id ? Number(outForm.product_id) : null,
-        warranty_months: outForm.warranty_months ? Number(outForm.warranty_months) : null,
-        sale_price: Number(outForm.sale_price),
-        order_id: outForm.order_id ? Number(outForm.order_id) : null,
-      });
-      setOutFormOpen(false);
-      setSalesPage(1);
-      await fetchSales();
-      fetchInventorySummary();
-    } catch (err) {
-      console.error('Failed to save sale:', err);
-      setOutError(err.response?.data?.message || 'Failed to save.');
-    } finally {
-      setOutSaving(false);
-    }
-  };
-
-  const confirmDeleteSale = async () => {
-    setDeletingSale(true);
-    try {
-      await client.delete(`/api/admin/serials/${deleteSaleTarget.serial_number}`);
-      setDeleteSaleTarget(null);
-      await fetchSales();
-      fetchInventorySummary();
-    } catch (err) {
-      alert(err.response?.data?.message || 'Failed to delete.');
-    } finally {
-      setDeletingSale(false);
-    }
-  };
-
-  const handleSearchSubmit = (e) => {
-    e.preventDefault();
-    setSearch(searchInput.trim());
-  };
-
   if (!canView) {
     return <p className="text-center text-slate-500 dark:text-slate-400 py-20">You don't have permission to view this.</p>;
   }
@@ -1016,217 +872,34 @@ export default function SerialsPage() {
         </div>
       )}
 
+      {tab === 'out-client' && (
+        <SalesTab
+          key="client"
+          kind="client"
+          canManage={canManage}
+          products={products}
+          loadProducts={loadProducts}
+          onInventoryChanged={fetchInventorySummary}
+          extraActions={
+            <button
+              onClick={openOfferForm}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white transition-colors"
+            >
+              <Package className="w-4 h-4" /> Record PC Offer
+            </button>
+          }
+        />
+      )}
+
       {tab === 'out-distributor' && (
-        <DistributorSalesTab
+        <SalesTab
+          key="distributor"
+          kind="distributor"
           canManage={canManage}
           products={products}
           loadProducts={loadProducts}
           onInventoryChanged={fetchInventorySummary}
         />
-      )}
-
-      {tab === 'out-client' && (
-        <div>
-          <div className="flex justify-between items-center gap-2 mb-4">
-            <form onSubmit={handleSearchSubmit} className="flex gap-2 flex-1 max-w-md">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                <input
-                  type="text"
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
-                  placeholder="Search serial, SKU, product or notes..."
-                  className="w-full bg-white dark:bg-[#161b22] border border-slate-200 dark:border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500 transition-colors"
-                />
-              </div>
-              <button
-                type="submit"
-                className="px-4 py-2.5 rounded-xl text-xs font-semibold bg-slate-900 dark:bg-white text-white dark:text-slate-900 transition-colors shrink-0"
-              >
-                Search
-              </button>
-            </form>
-
-            {canManage && (
-              <div className="flex gap-2 shrink-0">
-                <button
-                  onClick={openOutForm}
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
-                >
-                  <Plus className="w-4 h-4" /> Record Sale
-                </button>
-                <button
-                  onClick={openOfferForm}
-                  className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white transition-colors"
-                >
-                  <Package className="w-4 h-4" /> Record PC Offer
-                </button>
-              </div>
-            )}
-          </div>
-
-          {salesLoading ? (
-            <div className="flex items-center justify-center py-20 text-indigo-600 dark:text-indigo-400 gap-2 text-sm font-medium">
-              <Loader2 className="w-5 h-5 animate-spin" /> Loading...
-            </div>
-          ) : salesError ? (
-            <p className="text-center text-red-500 py-20">{salesError}</p>
-          ) : sales.length === 0 ? (
-            <p className="text-center text-slate-500 dark:text-slate-400 py-20">
-              {search ? `No results for "${search}".` : 'No client sales recorded yet.'}
-            </p>
-          ) : (
-            <div className="bg-white dark:bg-[#161b22] border border-slate-200 dark:border-slate-800/80 rounded-2xl overflow-hidden shadow-sm">
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-100 dark:border-slate-800 text-left">
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Serial</th>
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">SKU / Product</th>
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Sale Price</th>
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Warranty</th>
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Sold</th>
-                      <th className="px-4 py-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wide">Notes</th>
-                      <th className="px-4 py-3" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sales.map((s) => {
-                      const isUnderWarranty = s.warranty_expires_at && new Date(s.warranty_expires_at) > new Date();
-                      // Units sold inside a PC Offer have no price of their own (the
-                      // offer carries one combined price) and are removed by deleting
-                      // the offer, so they're labelled instead of showing $0.00.
-                      const isOfferItem = Boolean(s.offer_id);
-                      const warrantyMonths = s.warranty_months ?? s.offer_warranty_months;
-                      return (
-                        <tr key={s.id} className="border-b border-slate-50 dark:border-slate-800/50 last:border-0">
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            <span className="font-mono font-semibold text-slate-900 dark:text-white">{s.serial_number || '—'}</span>
-                            {s.stock_in_receipt_id && (
-                              <span className="block text-[10px] text-slate-400 mt-0.5" title={`Cost $${Number(s.stock_in_cost_price).toFixed(2)}`}>
-                                IN: {s.stock_in_source || 'no source'} · {new Date(s.stock_in_received_at).toLocaleDateString()}
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            {s.product_name || s.sku}
-                            <span className="block text-[10px] text-slate-400 font-mono">{s.sku}</span>
-                          </td>
-                          <td className="px-4 py-3 font-mono text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                            {isOfferItem ? (
-                              <span className="inline-flex items-center gap-1 font-sans text-[11px] font-bold text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-500/10 px-2 py-0.5 rounded-full">
-                                <Package className="w-3 h-3" /> PC Offer #{s.offer_id}
-                              </span>
-                            ) : (
-                              `$${Number(s.sale_price).toFixed(2)}`
-                            )}
-                          </td>
-                          <td className="px-4 py-3 whitespace-nowrap">
-                            {warrantyMonths ? (
-                              <span
-                                className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ${
-                                  isUnderWarranty
-                                    ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10'
-                                    : 'text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800'
-                                }`}
-                              >
-                                {isUnderWarranty ? <ShieldCheck className="w-3 h-3" /> : <ShieldAlert className="w-3 h-3" />}
-                                {warrantyMonths}mo
-                              </span>
-                            ) : (
-                              <span className="text-xs text-slate-400">—</span>
-                            )}
-                            {s.order_id && <span className="block text-[10px] text-slate-400 mt-0.5">Order #{s.order_id}</span>}
-                          </td>
-                          <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">
-                            {new Date(s.sold_at).toLocaleDateString()}
-                          </td>
-                          <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400 max-w-[220px]">
-                            {s.notes ? (
-                              <button
-                                type="button"
-                                onClick={() => setViewSale(s)}
-                                title={s.notes}
-                                className="flex items-center gap-1 max-w-full text-left hover:text-slate-800 dark:hover:text-slate-200"
-                              >
-                                <StickyNote className="w-3 h-3 shrink-0 text-amber-500" />
-                                <span className="truncate">{s.notes}</span>
-                              </button>
-                            ) : (
-                              <span className="text-slate-300 dark:text-slate-600">—</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3 text-right whitespace-nowrap">
-                            {isOfferItem ? (
-                              <span className="text-[10px] text-slate-400" title="Edit or delete this unit from the PC Offers tab">
-                                via offer
-                              </span>
-                            ) : (
-                              <div className="flex items-center justify-end gap-1">
-                                <button
-                                  onClick={() => setViewSale(s)}
-                                  title="View sale details and notes"
-                                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                                >
-                                  <Eye className="w-3.5 h-3.5" />
-                                </button>
-                                {canManage && (
-                                  <>
-                                    <button
-                                      onClick={() => {
-                                        loadProducts();
-                                        setEditSale(s);
-                                      }}
-                                      title="Edit sale"
-                                      className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 transition-colors"
-                                    >
-                                      <Pencil className="w-3.5 h-3.5" />
-                                    </button>
-                                    <button
-                                      onClick={() => setDeleteSaleTarget(s)}
-                                      title="Delete sale"
-                                      className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
-                                    >
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-
-              {salesPagination && salesPagination.totalPages > 1 && (
-                <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 dark:border-slate-800">
-                  <p className="text-xs text-slate-400 dark:text-slate-500">
-                    Page {salesPagination.page} of {salesPagination.totalPages} · {salesPagination.total} total
-                  </p>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => setSalesPage((p) => Math.max(1, p - 1))}
-                      disabled={salesPagination.page <= 1}
-                      className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 disabled:opacity-40 hover:bg-slate-50 dark:hover:bg-slate-800"
-                    >
-                      <ChevronLeft className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={() => setSalesPage((p) => Math.min(salesPagination.totalPages, p + 1))}
-                      disabled={salesPagination.page >= salesPagination.totalPages}
-                      className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 disabled:opacity-40 hover:bg-slate-50 dark:hover:bg-slate-800"
-                    >
-                      <ChevronRight className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
       )}
 
       {tab === 'offers' && (
@@ -1547,134 +1220,6 @@ export default function SerialsPage() {
         </Modal>
       )}
 
-      {outFormOpen && (
-        <Modal title="Record a Sale" onClose={() => !outSaving && setOutFormOpen(false)}>
-          <form onSubmit={submitOut} className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Product</label>
-              <ProductOrSkuPicker
-                key={salePickerKey}
-                products={products}
-                productId={outForm.product_id}
-                sku={outForm.sku}
-                onProductChange={(id, sku) => setOutForm((p) => ({ ...p, product_id: id, sku }))}
-                onSkuChange={(sku) => setOutForm((p) => ({ ...p, sku }))}
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Serial Number</label>
-              <input
-                type="text"
-                value={outForm.serial_number}
-                onChange={(e) => {
-                  setOutForm((p) => ({ ...p, serial_number: e.target.value }));
-                  setSaleSerialInfo(null);
-                }}
-                onBlur={(e) => lookupSaleSerial(e.target.value)}
-                placeholder="e.g. SN-ABC123456"
-                className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-              />
-              {saleSerialInfo && !saleSerialInfo.notFound && (
-                <div className="mt-1.5 space-y-1">
-                  <p className="text-[11px] text-emerald-600 dark:text-emerald-400 flex items-start gap-1">
-                    <Info className="w-3 h-3 mt-0.5 shrink-0" />
-                    Came in {new Date(saleSerialInfo.received_at).toLocaleDateString()}
-                    {saleSerialInfo.source ? ` from ${saleSerialInfo.source}` : ''} at $
-                    {Number(saleSerialInfo.cost_price).toFixed(2)} ({saleSerialInfo.product_name || saleSerialInfo.sku})
-                  </p>
-                  {saleSerialInfo.sold && (
-                    <p className="text-[11px] text-red-600 dark:text-red-400 flex items-start gap-1">
-                      <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" /> This serial is already recorded as sold.
-                    </p>
-                  )}
-                  {outForm.sku.trim() && outForm.sku.trim() !== saleSerialInfo.sku && (
-                    <p className="text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-1">
-                      <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" /> It was logged in under SKU {saleSerialInfo.sku}, not{' '}
-                      {outForm.sku.trim()}.
-                    </p>
-                  )}
-                </div>
-              )}
-              {saleSerialInfo?.notFound && (
-                <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5">
-                  Not logged on any stock-in by serial (fine if that stock was logged by quantity).
-                </p>
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Warranty (months)</label>
-                <input
-                  type="number"
-                  min="0"
-                  value={outForm.warranty_months}
-                  onChange={(e) => setOutForm((p) => ({ ...p, warranty_months: e.target.value }))}
-                  placeholder="e.g. 12"
-                  className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Sale Price</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={outForm.sale_price}
-                  onChange={(e) => setOutForm((p) => ({ ...p, sale_price: e.target.value }))}
-                  placeholder="e.g. 129.99"
-                  className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Order ID (optional)</label>
-              <input
-                type="number"
-                value={outForm.order_id}
-                onChange={(e) => setOutForm((p) => ({ ...p, order_id: e.target.value }))}
-                placeholder="Link to a checkout order, if any"
-                className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Notes (optional)</label>
-              <textarea
-                rows={2}
-                value={outForm.notes}
-                onChange={(e) => setOutForm((p) => ({ ...p, notes: e.target.value }))}
-                placeholder="e.g. buyer name/phone if sold in person"
-                className="w-full bg-slate-50 dark:bg-[#0d1117] border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
-              />
-            </div>
-
-            {outError && (
-              <div className="text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl p-3">
-                {outError}
-              </div>
-            )}
-
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setOutFormOpen(false)}
-                disabled={outSaving}
-                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={outSaving}
-                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-60"
-              >
-                {outSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                Record Sale
-              </button>
-            </div>
-          </form>
-        </Modal>
-      )}
-
       {offerFormOpen && (
         <Modal title="Record a PC Offer" onClose={() => !offerSaving && setOfferFormOpen(false)} maxWidth="max-w-2xl">
           <form onSubmit={submitOffer} className="space-y-4">
@@ -1897,43 +1442,6 @@ export default function SerialsPage() {
           busy={deletingReceipt}
           onConfirm={confirmDeleteReceipt}
           onCancel={() => setDeleteReceiptTarget(null)}
-        />
-      )}
-
-      {viewSale && (
-        <ClientSaleDetailsModal
-          sale={viewSale}
-          canEdit={canManage}
-          onClose={() => setViewSale(null)}
-          onEdit={() => {
-            loadProducts();
-            setEditSale(viewSale);
-            setViewSale(null);
-          }}
-        />
-      )}
-
-      {editSale && (
-        <ClientSaleEditModal
-          sale={editSale}
-          products={products}
-          onClose={() => setEditSale(null)}
-          onSaved={() => {
-            setEditSale(null);
-            fetchSales();
-            fetchInventorySummary();
-          }}
-        />
-      )}
-
-      {deleteSaleTarget && (
-        <ConfirmDialog
-          title={`Delete sale record "${deleteSaleTarget.serial_number}"?`}
-          message="This removes its warranty record entirely. This can't be undone."
-          confirmLabel="Delete"
-          busy={deletingSale}
-          onConfirm={confirmDeleteSale}
-          onCancel={() => setDeleteSaleTarget(null)}
         />
       )}
 
