@@ -1,10 +1,13 @@
-// src/components/inventory/DistributorSalesTab.jsx
+// src/components/inventory/SalesTab.jsx
 //
-// Distributor sales: one sale to a distributor can hold many items (SKUs),
-// each with many serial numbers. Sales can be searched, opened to read the
-// notes and every unit, and edited afterwards — the header (distributor,
-// date, order, notes), a whole item line (price / warranty / product),
-// single serials, adding units, and removing units.
+// Multi-item sales, used by both the Client Sales and Distributor Sales
+// tabs. One sale can hold many items (SKUs), each with many serial
+// numbers. Sales can be searched, opened to read the notes and every unit,
+// and edited afterwards — the header (who it went to, date, order, notes),
+// a whole item line (price / warranty / product), single serials, adding
+// units, and removing units. The two kinds differ only in who the sale is
+// to: a registered distributor (required) or a client (optional name and
+// phone) — see KINDS below.
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Plus,
@@ -19,6 +22,8 @@ import {
   StickyNote,
   X,
   Package,
+  User,
+  Phone,
 } from 'lucide-react';
 import client, { fetchAllPages } from '../../api/client';
 import Modal from '../Modal';
@@ -26,9 +31,46 @@ import ConfirmDialog from '../ConfirmDialog';
 import { inputClass, labelClass, errorBoxClass, money, toDateInput, withDate, pendingSerials } from './helpers';
 import { ProductOrSkuPicker, SerialChipsInput } from './shared';
 
+const KINDS = {
+  distributor: {
+    api: '/api/admin/distributor-sales',
+    noun: 'distributor sale',
+    createLabel: 'Record Distributor Sale',
+    createTitle: 'Record a Distributor Sale',
+    editTitle: 'Edit Distributor Sale',
+    searchPlaceholder: 'Search distributor, serial, SKU, notes or #sale...',
+    icon: Truck,
+    iconClass: 'bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-400',
+    partyName: (sale) => sale.distributor_name,
+  },
+  client: {
+    api: '/api/admin/client-sales',
+    noun: 'client sale',
+    createLabel: 'Record Sale',
+    createTitle: 'Record a Client Sale',
+    editTitle: 'Edit Sale',
+    searchPlaceholder: 'Search customer, phone, serial, SKU, notes or #sale...',
+    icon: User,
+    iconClass: 'bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400',
+    partyName: (sale) => sale.customer_name || 'Walk-in client',
+  },
+};
+
+// Who the sale is to, as form values / API payload, per kind.
+const partyValues = (kind, sale) =>
+  kind === 'distributor'
+    ? { distributor_id: sale ? String(sale.distributor_id) : '' }
+    : { customer_name: sale?.customer_name ?? '', customer_phone: sale?.customer_phone ?? '' };
+const partyPayload = (kind, values) =>
+  kind === 'distributor'
+    ? { distributor_id: Number(values.distributor_id) }
+    : { customer_name: values.customer_name, customer_phone: values.customer_phone };
+const partyError = (kind, values) =>
+  kind === 'distributor' && !values.distributor_id ? 'Pick which distributor this sale is to.' : null;
+
 const EMPTY_LINE = { product_id: null, sku: '', sale_price: '', warranty_months: '', serial_numbers: [] };
-const newSaleForm = () => ({
-  distributor_id: '',
+const newSaleForm = (kind) => ({
+  ...partyValues(kind, null),
   sold_date: toDateInput(),
   order_id: '',
   notes: '',
@@ -69,7 +111,8 @@ function validateLine(line, label) {
   return null;
 }
 
-export default function DistributorSalesTab({ canManage, products, loadProducts, onInventoryChanged }) {
+export default function SalesTab({ kind, canManage, products, loadProducts, onInventoryChanged, extraActions }) {
+  const K = KINDS[kind];
   const [sales, setSales] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -84,12 +127,12 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
   const [actionError, setActionError] = useState(null);
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState(newSaleForm);
+  const [form, setForm] = useState(() => newSaleForm(kind));
   const [formError, setFormError] = useState(null);
   const [saving, setSaving] = useState(false);
   const createFormRef = useRef(null);
 
-  const [headerEdit, setHeaderEdit] = useState(null); // { distributor_id, sold_date, order_id, notes }
+  const [headerEdit, setHeaderEdit] = useState(null); // { ...party, sold_date, order_id, notes }
   const [lineEdit, setLineEdit] = useState(null); // { line, product_id, sku, sale_price, warranty_months }
   const [addUnits, setAddUnits] = useState(null); // { line|null, product_id, sku, sale_price, warranty_months, serial_numbers }
   const [unitEdit, setUnitEdit] = useState(null); // { unit, serial_number }
@@ -106,30 +149,30 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
     try {
       const params = { page, limit: 20 };
       if (search) params.q = search;
-      const res = await client.get('/api/admin/distributor-sales', { params });
+      const res = await client.get(K.api, { params });
       setSales(res.data?.data || []);
       setPagination(res.data?.pagination || null);
     } catch (err) {
-      console.error('Failed to load distributor sales:', err);
-      setError(err.response?.data?.message || 'Failed to load distributor sales.');
+      console.error(`Failed to load ${K.noun}s:`, err);
+      setError(err.response?.data?.message || `Failed to load ${K.noun}s.`);
     } finally {
       setLoading(false);
     }
-  }, [page, search]);
+  }, [page, search, K]);
 
   useEffect(() => {
     fetchSales();
   }, [fetchSales]);
 
   const loadDistributors = useCallback(async () => {
-    if (distributors) return;
+    if (kind !== 'distributor' || distributors) return;
     try {
       setDistributors(await fetchAllPages('/api/admin/distributors'));
     } catch (err) {
       console.error('Failed to load distributors:', err);
       setDistributors([]);
     }
-  }, [distributors]);
+  }, [kind, distributors]);
 
   const lines = useMemo(() => (detail ? groupUnits(detail.units || []) : []), [detail]);
 
@@ -150,7 +193,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
     setExpandedId(sale.id);
     setDetail(null);
     try {
-      const res = await client.get(`/api/admin/distributor-sales/${sale.id}`);
+      const res = await client.get(`${K.api}/${sale.id}`);
       setDetail(res.data?.data);
     } catch (err) {
       console.error('Failed to load sale:', err);
@@ -160,7 +203,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
 
   // ---------------- create
   const openCreate = () => {
-    setForm(newSaleForm());
+    setForm(newSaleForm(kind));
     setFormError(null);
     setCreateOpen(true);
     loadProducts();
@@ -175,8 +218,9 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
   const submitCreate = async (e) => {
     e.preventDefault();
     setFormError(null);
-    if (!form.distributor_id) {
-      setFormError('Pick which distributor this sale is to.');
+    const whoError = partyError(kind, form);
+    if (whoError) {
+      setFormError(whoError);
       return;
     }
 
@@ -205,8 +249,8 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
     setSaving(true);
     try {
       const today = toDateInput();
-      const res = await client.post('/api/admin/distributor-sales', {
-        distributor_id: Number(form.distributor_id),
+      const res = await client.post(K.api, {
+        ...partyPayload(kind, form),
         order_id: form.order_id ? Number(form.order_id) : null,
         notes: form.notes,
         sold_at: form.sold_date && form.sold_date !== today ? withDate(null, form.sold_date) : undefined,
@@ -228,7 +272,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
       await fetchSales();
       onInventoryChanged?.();
     } catch (err) {
-      console.error('Failed to record distributor sale:', err);
+      console.error(`Failed to record ${K.noun}:`, err);
       setFormError(err.response?.data?.message || 'Failed to save.');
     } finally {
       setSaving(false);
@@ -244,7 +288,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
       close();
       applySale(res.data?.data);
     } catch (err) {
-      console.error('Distributor sale update failed:', err);
+      console.error(`${K.noun} update failed:`, err);
       setModalError(err.response?.data?.message || 'Failed to save.');
     } finally {
       setModalSaving(false);
@@ -255,7 +299,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
     loadDistributors();
     setModalError(null);
     setHeaderEdit({
-      distributor_id: String(detail.distributor_id),
+      ...partyValues(kind, detail),
       sold_date: toDateInput(detail.sold_at),
       order_id: detail.order_id ?? '',
       notes: detail.notes ?? '',
@@ -264,17 +308,18 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
 
   const submitHeaderEdit = (e) => {
     e.preventDefault();
-    if (!headerEdit.distributor_id) {
-      setModalError('Pick which distributor this sale is to.');
+    const whoError = partyError(kind, headerEdit);
+    if (whoError) {
+      setModalError(whoError);
       return;
     }
     const body = {
-      distributor_id: Number(headerEdit.distributor_id),
+      ...partyPayload(kind, headerEdit),
       order_id: headerEdit.order_id === '' ? null : Number(headerEdit.order_id),
       notes: headerEdit.notes,
     };
     if (headerEdit.sold_date !== toDateInput(detail.sold_at)) body.sold_at = withDate(detail.sold_at, headerEdit.sold_date);
-    runModal(() => client.patch(`/api/admin/distributor-sales/${detail.id}`, body), () => setHeaderEdit(null));
+    runModal(() => client.patch(`${K.api}/${detail.id}`, body), () => setHeaderEdit(null));
   };
 
   const openLineEdit = (line) => {
@@ -316,7 +361,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
       }
       body.warranty_months = warranty_months === '' ? null : Number(warranty_months);
     }
-    runModal(() => client.patch(`/api/admin/distributor-sales/${detail.id}/units`, body), () => setLineEdit(null));
+    runModal(() => client.patch(`${K.api}/${detail.id}/units`, body), () => setLineEdit(null));
   };
 
   const openAddUnits = (line) => {
@@ -347,7 +392,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
     }
     runModal(
       () =>
-        client.post(`/api/admin/distributor-sales/${detail.id}/units`, {
+        client.post(`${K.api}/${detail.id}/units`, {
           product_id: draft.product_id ? Number(draft.product_id) : null,
           sku: draft.sku,
           sale_price: Number(draft.sale_price),
@@ -366,7 +411,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
     }
     runModal(
       () =>
-        client.patch(`/api/admin/distributor-sales/${detail.id}/units/${unitEdit.unit.id}`, {
+        client.patch(`${K.api}/${detail.id}/units/${unitEdit.unit.id}`, {
           serial_number: unitEdit.serial_number,
         }),
       () => setUnitEdit(null)
@@ -399,7 +444,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
       message: 'Its sale and warranty record will be deleted.',
       label: 'Remove',
       run: async () => {
-        const res = await client.delete(`/api/admin/distributor-sales/${detail.id}/units/${unit.id}`);
+        const res = await client.delete(`${K.api}/${detail.id}/units/${unit.id}`);
         applySale(res.data?.data);
       },
     });
@@ -410,7 +455,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
       message: 'Every serial on this item and its warranty records will be deleted.',
       label: 'Remove Item',
       run: async () => {
-        const res = await client.delete(`/api/admin/distributor-sales/${detail.id}/units`, {
+        const res = await client.delete(`${K.api}/${detail.id}/units`, {
           data: { unit_ids: line.units.map((u) => u.id) },
         });
         applySale(res.data?.data);
@@ -419,13 +464,13 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
 
   const deleteSale = (sale) =>
     askConfirm({
-      title: `Delete distributor sale #${sale.id}?`,
-      message: `This deletes the sale to ${sale.distributor_name} and all ${sale.unit_count} unit${
+      title: `Delete ${K.noun} #${sale.id}?`,
+      message: `This deletes the sale to ${K.partyName(sale)} and all ${sale.unit_count} unit${
         sale.unit_count !== 1 ? 's' : ''
       } in it, including their warranty records. This can't be undone.`,
       label: 'Delete Sale',
       run: async () => {
-        await client.delete(`/api/admin/distributor-sales/${sale.id}`);
+        await client.delete(`${K.api}/${sale.id}`);
         setExpandedId(null);
         setDetail(null);
         await fetchSales();
@@ -439,23 +484,55 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
   const formTotal = form.lines.reduce((s, l) => s + (Number(l.sale_price) || 0) * l.serial_numbers.length, 0);
   const formUnits = form.lines.reduce((s, l) => s + l.serial_numbers.length, 0);
 
-  const distributorSelect = (value, onChange) => (
-    <>
-      <select value={value} onChange={(e) => onChange(e.target.value)} className={inputClass}>
-        <option value="">{distributors === null ? 'Loading distributors…' : 'Select distributor'}</option>
-        {(distributors || []).map((d) => (
-          <option key={d.id} value={d.id}>
-            {d.name}
-          </option>
-        ))}
-      </select>
-      {distributors?.length === 0 && (
-        <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5">
-          No distributors registered yet — add one under "Distributor Profiles" first.
-        </p>
-      )}
-    </>
-  );
+  // Who the sale is to: a distributor picker, or the client's name + phone.
+  const partyFields = (values, setValues) =>
+    kind === 'distributor' ? (
+      <div>
+        <label className={labelClass}>Distributor</label>
+        <select
+          value={values.distributor_id}
+          onChange={(e) => setValues((v) => ({ ...v, distributor_id: e.target.value }))}
+          className={inputClass}
+        >
+          <option value="">{distributors === null ? 'Loading distributors…' : 'Select distributor'}</option>
+          {(distributors || []).map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+        {distributors?.length === 0 && (
+          <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5">
+            No distributors registered yet — add one under "Distributor Profiles" first.
+          </p>
+        )}
+      </div>
+    ) : (
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className={labelClass}>Customer Name (optional)</label>
+          <input
+            type="text"
+            value={values.customer_name}
+            onChange={(e) => setValues((v) => ({ ...v, customer_name: e.target.value }))}
+            placeholder="e.g. Rami Khalil"
+            className={inputClass}
+          />
+        </div>
+        <div>
+          <label className={labelClass}>Phone (optional)</label>
+          <input
+            type="tel"
+            value={values.customer_phone}
+            onChange={(e) => setValues((v) => ({ ...v, customer_phone: e.target.value }))}
+            placeholder="e.g. 70 123 456"
+            className={inputClass}
+          />
+        </div>
+      </div>
+    );
+
+  const KindIcon = K.icon;
 
   return (
     <div>
@@ -474,7 +551,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
               type="text"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search distributor, serial, SKU, notes or #sale..."
+              placeholder={K.searchPlaceholder}
               className="w-full bg-white dark:bg-[#161b22] border border-slate-200 dark:border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500 transition-colors"
             />
           </div>
@@ -486,12 +563,15 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
           </button>
         </form>
         {canManage && (
-          <button
-            onClick={openCreate}
-            className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shrink-0"
-          >
-            <Plus className="w-4 h-4" /> Record Distributor Sale
-          </button>
+          <div className="flex gap-2 shrink-0">
+            <button
+              onClick={openCreate}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+            >
+              <Plus className="w-4 h-4" /> {K.createLabel}
+            </button>
+            {extraActions}
+          </div>
         )}
       </div>
 
@@ -503,7 +583,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
         <p className="text-center text-red-500 py-20">{error}</p>
       ) : sales.length === 0 ? (
         <p className="text-center text-slate-500 dark:text-slate-400 py-20">
-          {search ? `No distributor sales match "${search}".` : 'No distributor sales recorded yet.'}
+          {search ? `No ${K.noun}s match "${search}".` : `No ${K.noun}s recorded yet.`}
         </p>
       ) : (
         <div className="space-y-3">
@@ -516,17 +596,22 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
               >
                 <button onClick={() => toggleExpand(sale)} className="w-full flex items-center justify-between gap-4 p-4 text-left">
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-9 h-9 rounded-full bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
-                      <Truck className="w-4 h-4" />
+                    <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${K.iconClass}`}>
+                      <KindIcon className="w-4 h-4" />
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 truncate">
-                        #{sale.id} · {sale.distributor_name}
+                        #{sale.id} · {K.partyName(sale)}
                       </p>
                       <p className="text-xs text-slate-400 dark:text-slate-500">
                         {new Date(sale.sold_at).toLocaleDateString()} · {sale.unit_count} unit{sale.unit_count !== 1 ? 's' : ''} ·{' '}
                         {sale.sku_count} item{sale.sku_count !== 1 ? 's' : ''}
                         {sale.order_id && ` · Order #${sale.order_id}`}
+                        {sale.customer_phone && (
+                          <span className="inline-flex items-center gap-0.5 ml-1">
+                            · <Phone className="w-3 h-3" /> {sale.customer_phone}
+                          </span>
+                        )}
                       </p>
                       {sale.notes && (
                         <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 flex items-center gap-1 min-w-0">
@@ -735,15 +820,12 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
         </div>
       )}
 
-      {/* ---------------- Record a distributor sale ---------------- */}
+      {/* ---------------- Record a sale ---------------- */}
       {createOpen && (
-        <Modal title="Record a Distributor Sale" onClose={() => !saving && setCreateOpen(false)} maxWidth="max-w-3xl">
+        <Modal title={K.createTitle} onClose={() => !saving && setCreateOpen(false)} maxWidth="max-w-3xl">
           <form ref={createFormRef} onSubmit={submitCreate} className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className={labelClass}>Distributor</label>
-                {distributorSelect(form.distributor_id, (v) => setForm((f) => ({ ...f, distributor_id: v })))}
-              </div>
+              {partyFields(form, setForm)}
               <div>
                 <label className={labelClass}>Sale Date</label>
                 <input
@@ -882,7 +964,7 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
                 className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-60"
               >
                 {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                Record Distributor Sale
+                {K.createLabel}
               </button>
             </div>
           </form>
@@ -891,12 +973,9 @@ export default function DistributorSalesTab({ canManage, products, loadProducts,
 
       {/* ---------------- Edit sale header ---------------- */}
       {headerEdit && (
-        <Modal title={`Edit Distributor Sale #${detail?.id}`} onClose={() => !modalSaving && setHeaderEdit(null)}>
+        <Modal title={`${K.editTitle} #${detail?.id}`} onClose={() => !modalSaving && setHeaderEdit(null)}>
           <form onSubmit={submitHeaderEdit} className="space-y-4">
-            <div>
-              <label className={labelClass}>Distributor</label>
-              {distributorSelect(headerEdit.distributor_id, (v) => setHeaderEdit((h) => ({ ...h, distributor_id: v })))}
-            </div>
+            {partyFields(headerEdit, setHeaderEdit)}
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className={labelClass}>Sale Date</label>

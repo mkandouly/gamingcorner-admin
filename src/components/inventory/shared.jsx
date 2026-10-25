@@ -121,6 +121,11 @@ export function SerialChipsInput({ value, onChange, taken, autoFocus = false, pl
               add(draft);
             }
           }}
+          // Leaving the box adds what was typed, so the unit count and
+          // totals on screen always match what will be saved.
+          onBlur={() => {
+            if (draft.trim()) add(draft);
+          }}
           onPaste={(e) => {
             const text = e.clipboardData.getData('text');
             if (parseSerials(text).length > 1) {
